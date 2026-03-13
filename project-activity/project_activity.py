@@ -161,9 +161,10 @@ def fetch_repos(project, repos):
 
 
 def analyze_mbox_threads(project, list_name, months):
-    """Analyze mbox files and return top threads."""
+    """Analyze mbox files and return top threads with first message ID."""
     now = datetime.now()
-    threads = defaultdict(int)  # subject -> message count
+    threads = defaultdict(int)  # normalized subject -> message count
+    thread_msgid = {}  # normalized subject -> first Message-ID seen
 
     for i in range(months + 1):
         d = now - timedelta(days=30 * i)
@@ -196,12 +197,18 @@ def analyze_mbox_threads(project, list_name, months):
                         s = s[s.index("]") + 1:].lstrip()
                     else:
                         break
-                threads[s.strip()] += 1
+                key = s.strip()
+                threads[key] += 1
+                if key not in thread_msgid:
+                    mid = msg.get("Message-ID", "")
+                    if mid:
+                        thread_msgid[key] = mid.strip("<>")
         except Exception:
             continue
 
     # Sort by count, top 5
-    top = sorted(threads.items(), key=lambda x: -x[1])[:5]
+    top = [(subj, count, thread_msgid.get(subj, "")) for subj, count in
+           sorted(threads.items(), key=lambda x: -x[1])[:5]]
     total = sum(threads.values())
     return top, total
 
@@ -247,10 +254,15 @@ def report(project, active_lists, repos, months):
         section = []
         section.append(f"### {ln}@ ({total} messages)")
         section.append("")
-        section.append("| Messages | Thread |")
-        section.append("|-------:|--------|")
-        for subject, count in top_threads:
-            section.append(f"| {count} | {subject} |")
+        list_id = f"{ln}.{project}.apache.org"
+        section.append("| Messages | Thread | Link |")
+        section.append("|-------:|--------|------|")
+        for subject, count, msgid in top_threads:
+            if msgid:
+                link = f"[thread](https://lists.apache.org/thread/<{msgid}>?<{list_id}>)"
+            else:
+                link = ""
+            section.append(f"| {count} | {subject} | {link} |")
         section.append("")
         list_sections.append("\n".join(section))
 
