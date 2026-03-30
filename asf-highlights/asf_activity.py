@@ -14,7 +14,7 @@ def get_date_range():
     last_month_end = today.replace(day=1) - timedelta(days=1)
     return last_month_start, last_month_end
 
-def find_committers():
+def find_committers(md=False):
     people_data = httpx.get("https://projects.apache.org/json/foundation/people.json").json()
     ldap_data = httpx.get("https://whimsy.apache.org/public/public_ldap_people.json").json()
     
@@ -38,16 +38,25 @@ def find_committers():
     
     if new_committers:
         total = sum(len(c) for c in new_committers.values())
-        print(f"In {last_month_start.strftime('%B, %Y')}, {len(new_committers)} projects added a total of {total} new committers\n")
-        for project in sorted(new_committers.keys()):
-            print(f"{project.upper()}:")
-            for committer in new_committers[project]:
-                print(f"  - {committer['name']} ({committer['id']}) on {committer['date']}")
-            print()
+        if md:
+            print(f"## New Committers\n")
+            print(f"In {last_month_start.strftime('%B, %Y')}, {len(new_committers)} projects elected a total of {total} committers.\n")
+            for project in sorted(new_committers.keys()):
+                print(f"### {project.upper()}\n")
+                for committer in new_committers[project]:
+                    print(f"- {committer['name']} ({committer['id']}) — {committer['date']}")
+                print()
+        else:
+            print(f"In {last_month_start.strftime('%B, %Y')}, {len(new_committers)} projects elected a total of {total} committers\n")
+            for project in sorted(new_committers.keys()):
+                print(f"{project.upper()}:")
+                for committer in new_committers[project]:
+                    print(f"  - {committer['name']} ({committer['id']}) on {committer['date']}")
+                print()
     else:
-        print(f"No new committers added in {last_month_start.strftime('%B %Y')}")
+        print(f"No new committers in {last_month_start.strftime('%B %Y')}")
 
-def find_pmc():
+def find_pmc(md=False):
     committee_data = httpx.get("https://whimsy.apache.org/public/committee-info.json").json()
     committees_data = httpx.get("https://projects.apache.org/json/foundation/committees.json").json()
     
@@ -83,23 +92,35 @@ def find_pmc():
         total = sum(len(m) for m in new_pmc_members.values())
         new_project_members = sum(len(m) for p, m in new_pmc_members.items() if p in new_projects)
         
-        summary = f"In {last_month_start.strftime('%B, %Y')}, {len(new_pmc_members)} projects added a total of {total} new PMC members"
+        summary = f"In {last_month_start.strftime('%B, %Y')}, {len(new_pmc_members)} projects elected a total of {total} PMC members"
         if new_project_members > 0:
             summary += f". {new_project_members} of those are part of newly-established projects"
-        print(summary + "\n")
         
-        for project in sorted(new_pmc_members.keys()):
-            project_label = f"{project.upper()}"
-            if project in new_projects:
-                project_label += " 🎉 (New Project)"
-            print(f"{project_label}:")
-            for member in new_pmc_members[project]:
-                print(f"  - {member['name']} ({member['id']}) on {member['date']}")
-            print()
+        if md:
+            print(f"## New PMC Members\n")
+            print(summary + ".\n")
+            for project in sorted(new_pmc_members.keys()):
+                label = project.upper()
+                if project in new_projects:
+                    label += " 🎉 (New Project)"
+                print(f"### {label}\n")
+                for member in new_pmc_members[project]:
+                    print(f"- {member['name']} ({member['id']}) — {member['date']}")
+                print()
+        else:
+            print(summary + "\n")
+            for project in sorted(new_pmc_members.keys()):
+                project_label = f"{project.upper()}"
+                if project in new_projects:
+                    project_label += " 🎉 (New Project)"
+                print(f"{project_label}:")
+                for member in new_pmc_members[project]:
+                    print(f"  - {member['name']} ({member['id']}) on {member['date']}")
+                print()
     else:
-        print(f"No new PMC members added in {last_month_start.strftime('%B %Y')}")
+        print(f"No new PMC members in {last_month_start.strftime('%B %Y')}")
 
-def find_releases():
+def find_releases(md=False):
     releases_data = httpx.get("https://projects.apache.org/json/foundation/releases.json").json()
     
     last_month_start, last_month_end = get_date_range()
@@ -117,12 +138,21 @@ def find_releases():
     
     if project_releases:
         total = sum(len(r) for r in project_releases.values())
-        print(f"In {last_month_start.strftime('%B, %Y')}, {len(project_releases)} projects made {total} releases\n")
-        for project in sorted(project_releases.keys()):
-            print(f"{project.upper()}:")
-            for release in project_releases[project]:
-                print(f"  - {release['name']} on {release['date']}")
-            print()
+        if md:
+            print(f"## Releases\n")
+            print(f"In {last_month_start.strftime('%B, %Y')}, {len(project_releases)} projects made {total} releases.\n")
+            for project in sorted(project_releases.keys()):
+                print(f"### {project.upper()}\n")
+                for release in project_releases[project]:
+                    print(f"- {release['name']} — {release['date']}")
+                print()
+        else:
+            print(f"In {last_month_start.strftime('%B, %Y')}, {len(project_releases)} projects made {total} releases\n")
+            for project in sorted(project_releases.keys()):
+                print(f"{project.upper()}:")
+                for release in project_releases[project]:
+                    print(f"  - {release['name']} on {release['date']}")
+                print()
     else:
         print(f"No releases made in {last_month_start.strftime('%B %Y')}")
 
@@ -130,29 +160,49 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     
     if "-h" in args or "--help" in args:
-        print("Usage: find_activity.py [OPTIONS]")
+        print("Usage: asf_activity.py [OPTIONS]")
         print("\nOptions:")
-        print("  committers    Show new committers added last month")
-        print("  pmc           Show new PMC members added last month")
-        print("  releases      Show releases made last month")
-        print("  all           Show all reports (default)")
-        print("  -h, --help    Show this help message")
+        print("  committers        Show committers added last month")
+        print("  pmc               Show PMC members added last month")
+        print("  releases          Show releases made last month")
+        print("  all               Show all reports (default)")
+        print("  -m, --markdown    Save output to a timestamped .md file")
+        print("  -h, --help        Show this help message")
         print("\nExamples:")
-        print("  find_activity.py")
-        print("  find_activity.py committers")
-        print("  find_activity.py pmc releases")
+        print("  asf_activity.py")
+        print("  asf_activity.py committers")
+        print("  asf_activity.py pmc releases --markdown")
         sys.exit(0)
     
+    markdown = "-m" in args or "--markdown" in args
+    args = [a for a in args if a not in ("-m", "--markdown")]
+
+    outfile = None
+    if markdown:
+        filename = f"activity_{datetime.now().strftime('%Y_%m_%d')}.md"
+        outfile = open(filename, "w")
+        sys.stdout = outfile
+
     if not args or "all" in args:
-        find_committers()
-        print("\n" + "="*80 + "\n")
-        find_pmc()
-        print("\n" + "="*80 + "\n")
-        find_releases()
+        if markdown:
+            last_month_start, _ = get_date_range()
+            print(f"# ASF Activity — {last_month_start.strftime('%B %Y')}\n")
+        find_committers(md=markdown)
+        if not markdown:
+            print("\n" + "="*80 + "\n")
+        find_pmc(md=markdown)
+        if not markdown:
+            print("\n" + "="*80 + "\n")
+        find_releases(md=markdown)
     else:
         if "committers" in args:
-            find_committers()
+            find_committers(md=markdown)
         if "pmc" in args:
-            find_pmc()
+            find_pmc(md=markdown)
         if "releases" in args:
-            find_releases()
+            find_releases(md=markdown)
+
+    if outfile:
+        sys.stdout = sys.__stdout__
+        outfile.close()
+        print(f"Output saved to {filename}")
