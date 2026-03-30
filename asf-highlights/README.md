@@ -15,9 +15,10 @@ Options:
 - `pmc` — New PMC members added last month
 - `releases` — Releases made last month
 - `all` — All of the above (default)
+- `-m`, `--markdown` — Save output to a timestamped Markdown file (`activity_YYYY_MM_DD.md`)
 - `-h`, `--help` — Show help
 
-Multiple options can be combined, e.g. `uv run asf_activity.py committers pmc`.
+Multiple options can be combined, e.g. `uv run asf_activity.py committers pmc --markdown`.
 
 ## project_birthdays.py
 
