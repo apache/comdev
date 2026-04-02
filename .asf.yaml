@@ -1,0 +1,6 @@
+notifications:
+  issues: notifications@community.apache.org
+
+github:
+  features:
+    issues: true
