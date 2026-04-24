@@ -18,19 +18,18 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 ## Setup
 
 ```bash
-cd /path/to/ponymail-mcp
+cd ponymail-mcp
 npm install
 ```
 
-## Configure in Amazon Quick
+## Configure in Your MCP Client
 
-1. Open **Settings → Capabilities → MCP Servers**
-2. Click **Add MCP / Skill** → **Local (stdio)**
-3. Fill in:
-   - **Name**: `ponymail`
-   - **Command**: `node`
-   - **Args**: `/path/to/ponymail-mcp/index.js`
-4. Click **Save**
+Add a local (stdio) MCP server with:
+
+- **Command**: `node`
+- **Args**: `/path/to/ponymail-mcp/index.js`
+
+Refer to your MCP client's documentation for how to add a local stdio server.
 
 ## Environment Variables
 
@@ -43,9 +42,9 @@ npm install
 
 Public lists work without authentication. For private/restricted lists, you have two options:
 
-### Option 1: Automated OAuth (Recommended)
+### Option 1: OAuth via Login Tool (Recommended)
 
-Use the `login` tool from within Amazon Quick. It will:
+Use the `login` tool from within your MCP client. It will:
 
 1. Open a local helper page at `http://localhost:39817`
 2. The page links to PonyMail's login page — log in with your ASF LDAP credentials
