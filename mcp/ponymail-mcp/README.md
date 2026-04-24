@@ -14,6 +14,7 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | `login` | Authenticate via ASF OAuth to access private mailing lists |
 | `logout` | Clear cached session cookie |
 | `auth_status` | Check current authentication status |
+| `list_restrictions` | Show mailing list patterns blocked by server policy |
 
 ## Setup
 
@@ -37,6 +38,34 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 |----------|---------|-------------|
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
+| `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated list of list patterns to block. Set to `none` to disable. |
+
+## Restricted Lists
+
+Some mailing lists contain confidential Foundation business or PMC-private
+discussions. Even when an authenticated session would grant access, this
+server blocks them by default so an LLM cannot accidentally ingest them.
+
+**Default blocked patterns:**
+
+- `private@` — all PMC-private lists (matches `private@` on any domain)
+- `security@` — all project security lists
+- `board@apache.org`, `members@apache.org`, `operations@apache.org`,
+  `trademarks@apache.org`, `fundraising@apache.org`,
+  `executive-officers@apache.org`, `president@apache.org`,
+  `chairman@apache.org`, `secretary@apache.org`, `treasurer@apache.org`
+
+**Pattern forms** (used in `PONYMAIL_RESTRICTED_LISTS`):
+
+| Form | Meaning |
+|------|---------| 
+| `prefix@` | Any list with that local part (e.g. `private@` matches every `private@*`) |
+| `@domain` | All lists in that domain |
+| `prefix@domain` | Exact match |
+
+Setting `PONYMAIL_RESTRICTED_LISTS` replaces the defaults entirely. To
+preserve a default pattern while adding your own, include it in the value.
+Use `list_restrictions` from the MCP client to see what is currently active.
 
 ## Authentication (Private Lists)
 

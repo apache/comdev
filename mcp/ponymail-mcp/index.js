@@ -4,6 +4,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadSession, performLogin, clearSession } from "./auth.js";
+import {
+  restrictionFor,
+  restrictionForAddress,
+  restrictionError,
+  listRestrictions,
+} from "./restrictions.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
@@ -49,6 +55,25 @@ function truncate(text, max = 4000) {
   return text.slice(0, max) + `\n... [truncated, ${text.length - max} more chars]`;
 }
 
+// Extract (list, domain) from a PonyMail email record. PonyMail returns
+// `list` as "list@domain" and `list_raw` as "<list.domain>". We try both.
+function extractListDomain(record) {
+  const candidates = [record?.list, record?.list_raw];
+  for (const c of candidates) {
+    if (!c || typeof c !== "string") continue;
+    const stripped = c.replace(/^<|>$/g, "");
+    if (stripped.includes("@")) {
+      const [list, domain] = stripped.split("@", 2);
+      if (list && domain) return { list, domain };
+    }
+    const dot = stripped.indexOf(".");
+    if (dot > 0) {
+      return { list: stripped.slice(0, dot), domain: stripped.slice(dot + 1) };
+    }
+  }
+  return { list: null, domain: null };
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -74,7 +99,9 @@ server.tool(
       lines.push(`## ${domain}`);
       for (const [listName, count] of Object.entries(domainLists)) {
         const desc = descriptions[`${listName}@${domain}`] || "";
-        lines.push(`  - ${listName}: ${count} messages${desc ? " — " + desc : ""}`);
+        const restricted = restrictionFor(listName, domain);
+        const marker = restricted ? " [RESTRICTED — blocked by server policy]" : "";
+        lines.push(`  - ${listName}: ${count} messages${desc ? " — " + desc : ""}${marker}`);
       }
     }
 
@@ -109,6 +136,14 @@ server.tool(
     emails_only: z.boolean().optional().describe("If true, return email summaries only (skip thread_struct, participants, word cloud)"),
   },
   async ({ list, domain, query, timespan, from, subject, body, quick, emails_only }) => {
+    const restricted = restrictionFor(list, domain);
+    if (restricted) {
+      return {
+        content: [{ type: "text", text: restrictionError(list, domain, restricted) }],
+        isError: true,
+      };
+    }
+
     const params = {
       list,
       domain,
@@ -176,6 +211,15 @@ server.tool(
   async ({ id }) => {
     const data = await apiFetch("/api/email.lua", { id });
 
+    const { list, domain } = extractListDomain(data);
+    const restricted = list && domain ? restrictionFor(list, domain) : null;
+    if (restricted) {
+      return {
+        content: [{ type: "text", text: restrictionError(list, domain, restricted) }],
+        isError: true,
+      };
+    }
+
     const lines = [];
     lines.push(`# ${data.subject || "(no subject)"}`);
     lines.push(`From: ${data.from}`);
@@ -211,12 +255,33 @@ server.tool(
     "or email. Returns the thread as a flat list of email summaries.",
   {
     id: z.string().describe("The thread ID (tid)"),
+    list: z.string().describe("List prefix, e.g. 'dev', 'user'"),
+    domain: z.string().describe("List domain, e.g. 'iceberg.apache.org'"),
   },
-  async ({ id }) => {
+  async ({ id, list, domain }) => {
+    const restrictedUp = restrictionFor(list, domain);
+    if (restrictedUp) {
+      return {
+        content: [{ type: "text", text: restrictionError(list, domain, restrictedUp) }],
+        isError: true,
+      };
+    }
+
     // Use stats endpoint scoped to a very wide range and filter by tid
     // PonyMail doesn't have a dedicated thread endpoint, but we can fetch
     // the root email which contains thread_struct, then fetch each child.
     const root = await apiFetch("/api/email.lua", { id });
+
+    // Defence-in-depth: if the returned email belongs to a restricted list
+    // (e.g. caller passed a mismatched list/domain), block anyway.
+    const { list: rList, domain: rDomain } = extractListDomain(root);
+    const restrictedAfter = rList && rDomain ? restrictionFor(rList, rDomain) : null;
+    if (restrictedAfter) {
+      return {
+        content: [{ type: "text", text: restrictionError(rList, rDomain, restrictedAfter) }],
+        isError: true,
+      };
+    }
 
     const lines = [];
     lines.push(`# Thread: ${root.subject || "(no subject)"}`);
@@ -244,6 +309,17 @@ server.tool(
     subject: z.string().optional().describe("Filter by subject words"),
   },
   async ({ list, date, from: fromAddr, subject }) => {
+    const restricted = restrictionForAddress(list);
+    if (restricted) {
+      const at = list.indexOf("@");
+      const lp = at >= 0 ? list.slice(0, at) : list;
+      const dp = at >= 0 ? list.slice(at + 1) : "";
+      return {
+        content: [{ type: "text", text: restrictionError(lp, dp, restricted) }],
+        isError: true,
+      };
+    }
+
     const params = {
       list,
       date,
@@ -373,6 +449,32 @@ server.tool(
         ],
       };
     }
+  }
+);
+
+// --- Tool: list_restrictions ------------------------------------------------
+server.tool(
+  "list_restrictions",
+  "Show the mailing list patterns this server refuses to access. " +
+    "Patterns can be 'prefix@' (matches across all domains), '@domain' (all " +
+    "lists in a domain), or exact 'prefix@domain'. Configured via the " +
+    "PONYMAIL_RESTRICTED_LISTS env var.",
+  {},
+  async () => {
+    const patterns = listRestrictions();
+    const lines = [];
+    if (patterns.length === 0) {
+      lines.push("No restrictions configured. All lists accessible (subject to auth).");
+    } else {
+      lines.push("## Restricted list patterns");
+      for (const p of patterns) lines.push(`  - ${p}`);
+      lines.push("");
+      lines.push(
+        "Override with PONYMAIL_RESTRICTED_LISTS (comma-separated). " +
+          'Set to "none" to disable all restrictions.'
+      );
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 
