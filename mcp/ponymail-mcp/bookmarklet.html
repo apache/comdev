@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>PonyMail Cookie Bookmarklet</title></head>
+<body style="font-family:system-ui;max-width:700px;margin:40px auto;padding:0 20px">
+<h1>🐴 PonyMail Cookie Extractor</h1>
+<p>Drag this bookmarklet to your bookmarks bar:</p>
+
+<p style="text-align:center;margin:30px 0">
+<a href="javascript:void(fetch('/api/preferences.lua',{credentials:'include'}).then(r=>{const c=document.cookie;return r.json().then(j=>{const m=j.login&&j.login.credentials;if(!m){alert('Not logged in to PonyMail. Log in first, then try again.');return}const x=new XMLHttpRequest();x.open('GET','/api/preferences.lua',false);x.withCredentials=true;x.send();const raw=x.getResponseHeader('X-Request-Cookies')||'';let pc='';document.cookie.split(';').forEach(s=>{if(s.trim().startsWith('ponymail='))pc=s.trim()});if(!pc){const p=prompt('Logged in as: '+m.fullname+' ('+m.email+')\n\nThe ponymail cookie is HttpOnly so I cannot read it directly.\n\nPlease paste the cookie value from:\nDevTools → Network → any api/ request → Headers → Cookie\n\nLook for: ponymail=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx','');if(p){const v=p.startsWith('ponymail=')?p:'ponymail='+p;navigator.clipboard.writeText(v).then(()=>alert('Copied to clipboard:\n'+v)).catch(()=>prompt('Copy this:',v))}return}navigator.clipboard.writeText(pc).then(()=>alert('Cookie copied to clipboard!\n\n'+pc)).catch(()=>prompt('Copy this cookie value:',pc))})}).catch(e=>alert('Error: '+e.message)))"
+   style="display:inline-block;padding:12px 24px;background:#0066cc;color:white;text-decoration:none;border-radius:6px;font-size:1.1em;cursor:grab">
+   📋 Get PonyMail Cookie
+</a>
+</p>
+
+<h2>How to use</h2>
+<ol>
+  <li>Drag the blue button above to your <strong>bookmarks bar</strong></li>
+  <li>Go to <a href="https://lists.apache.org">lists.apache.org</a> and <strong>log in</strong></li>
+  <li>Click the bookmarklet</li>
+  <li>It will confirm you're logged in and prompt for the cookie value</li>
+  <li>The quickest way to get it: before clicking the bookmarklet, open DevTools (<code>Cmd+Option+I</code>) → <strong>Network</strong> tab, then click the bookmarklet. Look at the <code>preferences.lua</code> request → <strong>Request Headers</strong> → <strong>Cookie</strong> line</li>
+  <li>Copy just the <code>ponymail=xxxxxxxx-xxxx-...</code> part and paste it in the prompt</li>
+  <li>The bookmarklet copies the formatted cookie to your clipboard</li>
+  <li>Paste it into your MCP server's <code>PONYMAIL_SESSION_COOKIE</code> env var</li>
+</ol>
+
+<h2>Even simpler: Console one-liner</h2>
+<p>On <code>lists.apache.org</code>, open DevTools Console and run:</p>
+<pre style="background:#f5f5f5;padding:12px;border-radius:4px;overflow-x:auto">fetch('/api/preferences.lua').then(r=>r.json()).then(j=>{if(j.login?.credentials){console.log('✅ Logged in as:',j.login.credentials.fullname);console.log('Now check the Network tab for preferences.lua request → Cookie header → copy the ponymail=... value')}else{console.log('❌ Not logged in')}})</pre>
+</body>
+</html>
