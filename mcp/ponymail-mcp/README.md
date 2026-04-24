@@ -18,7 +18,7 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 ## Setup
 
 ```bash
-cd /Users/rcbowen/devel/ponymail-mcp
+cd /path/to/ponymail-mcp
 npm install
 ```
 
