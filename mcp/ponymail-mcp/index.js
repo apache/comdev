@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { loadSession, performLogin, clearSession } from "./auth.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
@@ -18,9 +19,17 @@ async function apiFetch(path, params = {}) {
     }
   }
 
-  const resp = await fetch(url.toString(), {
-    headers: { Accept: "application/json" },
-  });
+  // Build headers — include session cookie if available
+  const headers = { Accept: "application/json" };
+
+  // Priority: env var > cached session file
+  const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
+  const sessionCookie = envCookie || loadSession();
+  if (sessionCookie) {
+    headers.Cookie = sessionCookie;
+  }
+
+  const resp = await fetch(url.toString(), { headers });
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -204,6 +213,9 @@ server.tool(
     id: z.string().describe("The thread ID (tid)"),
   },
   async ({ id }) => {
+    // Use stats endpoint scoped to a very wide range and filter by tid
+    // PonyMail doesn't have a dedicated thread endpoint, but we can fetch
+    // the root email which contains thread_struct, then fetch each child.
     const root = await apiFetch("/api/email.lua", { id });
 
     const lines = [];
@@ -245,6 +257,122 @@ server.tool(
     return {
       content: [{ type: "text", text: truncate(text, 10000) }],
     };
+  }
+);
+
+// --- Tool: login ------------------------------------------------------------
+server.tool(
+  "login",
+  "Authenticate with Apache's OAuth system to access private mailing lists. " +
+    "Opens a browser window for ASF LDAP login, then caches the session cookie. " +
+    "Only needed for private/restricted lists — public lists work without auth.",
+  {},
+  async () => {
+    try {
+      const cookie = await performLogin(BASE_URL);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "✅ Successfully authenticated! Session cookie cached.\n\n" +
+              "You can now access private mailing lists. Session expires after ~20 hours.\n" +
+              "Use `auth_status` to check, `logout` to clear.",
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ Login failed: ${err.message}\n\nTry again, or set PONYMAIL_SESSION_COOKIE env var manually.`,
+          },
+        ],
+      };
+    }
+  }
+);
+
+// --- Tool: logout -----------------------------------------------------------
+server.tool(
+  "logout",
+  "Clear the cached PonyMail session cookie. After logout, only public lists " +
+    "will be accessible.",
+  {},
+  async () => {
+    clearSession();
+    return {
+      content: [
+        { type: "text", text: "Session cleared. Only public lists are accessible now." },
+      ],
+    };
+  }
+);
+
+// --- Tool: auth_status ------------------------------------------------------
+server.tool(
+  "auth_status",
+  "Check current authentication status. Shows whether a session cookie is " +
+    "cached and if it's still valid.",
+  {},
+  async () => {
+    const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
+    const sessionCookie = envCookie || loadSession();
+
+    if (!sessionCookie) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "❌ Not authenticated. No session cookie found.\n\n" +
+              "Use `login` to authenticate, or set PONYMAIL_SESSION_COOKIE env var.",
+          },
+        ],
+      };
+    }
+
+    // Validate the cookie
+    try {
+      const url = new URL("/api/preferences.lua", BASE_URL);
+      const resp = await fetch(url.toString(), {
+        headers: { Accept: "application/json", Cookie: sessionCookie },
+      });
+      const data = await resp.json();
+
+      if (data.login && data.login.credentials) {
+        const creds = data.login.credentials;
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Authenticated as: ${creds.fullname || "Unknown"} (${creds.email || "N/A"})\n\n` +
+                `Source: ${envCookie ? "environment variable" : "cached session file"}\n` +
+                "Session is valid.",
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "⚠️ Session cookie found but no login credentials returned.\n" +
+                "The session may have expired. Use `login` to re-authenticate.",
+            },
+          ],
+        };
+      }
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `⚠️ Could not validate session: ${err.message}\n` +
+              "Use `login` to re-authenticate.",
+          },
+        ],
+      };
+    }
   }
 );
 
