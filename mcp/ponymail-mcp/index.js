@@ -211,10 +211,8 @@ server.tool(
     "or email. Returns the thread as a flat list of email summaries.",
   {
     id: z.string().describe("The thread ID (tid)"),
-    list: z.string().describe("List prefix, e.g. 'dev'"),
-    domain: z.string().describe("List domain, e.g. 'iceberg.apache.org'"),
   },
-  async ({ id, list, domain }) => {
+  async ({ id }) => {
     // Use stats endpoint scoped to a very wide range and filter by tid
     // PonyMail doesn't have a dedicated thread endpoint, but we can fetch
     // the root email which contains thread_struct, then fetch each child.
