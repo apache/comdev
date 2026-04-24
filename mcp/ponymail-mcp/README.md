@@ -29,7 +29,7 @@ npm install
 3. Fill in:
    - **Name**: `ponymail`
    - **Command**: `node`
-   - **Args**: `/Users/rcbowen/devel/ponymail-mcp/index.js`
+   - **Args**: `/path/to/ponymail-mcp/index.js`
 4. Click **Save**
 
 ## Environment Variables
