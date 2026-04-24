@@ -3,7 +3,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadSession, performLogin, clearSession } from "./auth.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
@@ -19,17 +18,9 @@ async function apiFetch(path, params = {}) {
     }
   }
 
-  // Build headers — include session cookie if available
-  const headers = { Accept: "application/json" };
-
-  // Priority: env var > cached session file
-  const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-  const sessionCookie = envCookie || loadSession();
-  if (sessionCookie) {
-    headers.Cookie = sessionCookie;
-  }
-
-  const resp = await fetch(url.toString(), { headers });
+  const resp = await fetch(url.toString(), {
+    headers: { Accept: "application/json" },
+  });
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -213,9 +204,6 @@ server.tool(
     id: z.string().describe("The thread ID (tid)"),
   },
   async ({ id }) => {
-    // Use stats endpoint scoped to a very wide range and filter by tid
-    // PonyMail doesn't have a dedicated thread endpoint, but we can fetch
-    // the root email which contains thread_struct, then fetch each child.
     const root = await apiFetch("/api/email.lua", { id });
 
     const lines = [];
@@ -256,77 +244,6 @@ server.tool(
 
     return {
       content: [{ type: "text", text: truncate(text, 10000) }],
-    };
-  }
-);
-
-// --- Tool: login ------------------------------------------------------------
-server.tool(
-  "login",
-  "Authenticate with Apache's OAuth system to access private mailing lists. " +
-    "Opens a browser window for ASF LDAP login. The session cookie is cached " +
-    "to ~/.ponymail-mcp/session.json and reused for subsequent requests.",
-  {},
-  async () => {
-    // Check if already logged in
-    const existing = loadSession();
-    if (existing) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Already authenticated (cached session found). Use `logout` first to re-authenticate, or `auth_status` to check details.",
-          },
-        ],
-      };
-    }
-
-    try {
-      const cookie = await performLogin(BASE_URL);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `✅ Successfully authenticated! Session cookie cached.\nCookie: ${cookie.split("=")[0]}=...\nPrivate list access is now enabled.`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [
-          { type: "text", text: `❌ Authentication failed: ${err.message}` },
-        ],
-      };
-    }
-  }
-);
-
-// --- Tool: logout -----------------------------------------------------------
-server.tool(
-  "logout",
-  "Clear the cached PonyMail session cookie. After this, only public lists will be accessible.",
-  {},
-  async () => {
-    clearSession();
-    return {
-      content: [{ type: "text", text: "Session cleared. Only public lists are now accessible." }],
-    };
-  }
-);
-
-// --- Tool: auth_status ------------------------------------------------------
-server.tool(
-  "auth_status",
-  "Check whether an authenticated session exists and display session info.",
-  {},
-  async () => {
-    const cookie = process.env.PONYMAIL_SESSION_COOKIE || loadSession();
-    const source = process.env.PONYMAIL_SESSION_COOKIE ? "environment variable" : "cached session file";
-    const status = cookie
-      ? `✅ Authenticated (via ${source})\nCookie: ${cookie.split("=")[0]}=...`
-      : "❌ Not authenticated. Use the `login` tool to authenticate, or set PONYMAIL_SESSION_COOKIE env var.";
-    return {
-      content: [{ type: "text", text: status }],
     };
   }
 );
