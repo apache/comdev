@@ -1,21 +1,27 @@
 // Mailing list access restrictions.
 //
-// Some mailing lists (board@apache.org, members@apache.org, private@<pmc>, ...)
-// contain confidential Foundation business or PMC-private discussions. Even
-// if a user has an authenticated session cookie that grants access, we block
-// these lists at the MCP layer so an LLM cannot accidentally ingest them.
+// By default, this server blocks ALL private mailing lists — including
+// project-private (PMC) lists, security lists, and Foundation-private lists —
+// to prevent an LLM from accidentally ingesting confidential content.
 //
-// Patterns:
+// Two layers of defense:
+//   1. Pattern blocks (PONYMAIL_RESTRICTED_LISTS) — applied before fetching.
+//      Catches well-known private list names like "private@", "security@",
+//      board@apache.org, etc.
+//   2. Response-level private flag — applied after fetching. PonyMail tags
+//      private lists/messages with `private: true`; we block these even if
+//      they don't match a known pattern (e.g. unusually-named PMC lists).
+//
+// Opt-in via PONYMAIL_ALLOWED_LISTS (comma-separated patterns). A list on
+// the allowlist bypasses both layers. Use this for lists you are explicitly
+// authorized to access.
+//
+// Pattern forms (used in both env vars):
 //   "prefix@"         — matches any list whose local part equals `prefix`
 //                       (e.g. "private@" matches private@iceberg.apache.org
 //                       AND private@apache.org)
 //   "@domain"         — matches any list in that domain
 //   "prefix@domain"   — exact match
-//
-// The defaults cover ASF Foundation-level private lists plus the universal
-// PMC-private patterns. Override or replace via the PONYMAIL_RESTRICTED_LISTS
-// env var (comma-separated). Use PONYMAIL_RESTRICTED_LISTS="none" to disable
-// all restrictions.
 
 const DEFAULT_RESTRICTED = [
   // Universal PMC-private and security patterns (match across all domains)
@@ -34,10 +40,9 @@ const DEFAULT_RESTRICTED = [
   "treasurer@apache.org",
 ];
 
-function parseRestrictedLists() {
-  const raw = process.env.PONYMAIL_RESTRICTED_LISTS;
-  if (raw === undefined) return DEFAULT_RESTRICTED;
-  const trimmed = raw.trim();
+function parsePatternList(raw) {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim();
   if (trimmed === "" || trimmed.toLowerCase() === "none") return [];
   return trimmed
     .split(",")
@@ -45,7 +50,20 @@ function parseRestrictedLists() {
     .filter((s) => s.length > 0);
 }
 
+function parseRestrictedLists() {
+  const parsed = parsePatternList(process.env.PONYMAIL_RESTRICTED_LISTS);
+  return parsed === null ? DEFAULT_RESTRICTED : parsed;
+}
+
+function parseAllowedLists() {
+  const parsed = parsePatternList(process.env.PONYMAIL_ALLOWED_LISTS);
+  return parsed === null ? [] : parsed;
+}
+
+// Captured at module load. Changing PONYMAIL_RESTRICTED_LISTS or
+// PONYMAIL_ALLOWED_LISTS at runtime has no effect — restart the MCP server.
 const RESTRICTED = parseRestrictedLists();
+const ALLOWED = parseAllowedLists();
 
 function matchPattern(pattern, list, domain) {
   if (pattern.endsWith("@")) {
@@ -59,9 +77,23 @@ function matchPattern(pattern, list, domain) {
   return list === pattern.slice(0, at) && domain === pattern.slice(at + 1);
 }
 
-// Returns the matching pattern string if (list, domain) is restricted, else null.
+// Returns the matching allow pattern if (list, domain) is explicitly opted in,
+// else null. Allow-listing bypasses both pattern and private-flag blocks.
+export function allowedFor(list, domain) {
+  if (!list || !domain) return null;
+  const l = String(list).toLowerCase();
+  const d = String(domain).toLowerCase();
+  for (const pattern of ALLOWED) {
+    if (matchPattern(pattern, l, d)) return pattern;
+  }
+  return null;
+}
+
+// Returns the matching restricted pattern if (list, domain) should be blocked
+// pre-fetch, else null. Returns null when the list is on the allowlist.
 export function restrictionFor(list, domain) {
   if (!list || !domain) return null;
+  if (allowedFor(list, domain)) return null;
   const l = String(list).toLowerCase();
   const d = String(domain).toLowerCase();
   for (const pattern of RESTRICTED) {
@@ -79,13 +111,41 @@ export function restrictionForAddress(address) {
   return restrictionFor(address.slice(0, at), address.slice(at + 1));
 }
 
+function isTruthyPrivate(flag) {
+  if (flag === true || flag === 1) return true;
+  if (typeof flag === "string") {
+    return ["true", "1", "yes"].includes(flag.toLowerCase());
+  }
+  return false;
+}
+
+// Should the response be blocked because PonyMail marked it private?
+// Pass the value of the `private` field from a PonyMail API response.
+// Allow-listed lists bypass this check.
+export function isPrivateBlocked(list, domain, privateFlag) {
+  if (!isTruthyPrivate(privateFlag)) return false;
+  if (list && domain && allowedFor(list, domain)) return false;
+  return true;
+}
+
 export function restrictionError(list, domain, pattern) {
   return (
     `Access to ${list}@${domain} is blocked by this MCP server ` +
     `(matches restricted pattern "${pattern}"). ` +
     `These lists contain confidential Foundation or PMC-private content. ` +
-    `Adjust via the PONYMAIL_RESTRICTED_LISTS env var if you are authorized ` +
-    `to access this list and understand the implications.`
+    `If you are authorized to access this list, opt in by adding it to ` +
+    `PONYMAIL_ALLOWED_LISTS (e.g. "${list}@${domain}").`
+  );
+}
+
+export function privateError(list, domain) {
+  const addr = list && domain ? `${list}@${domain}` : "this list";
+  return (
+    `Access to ${addr} is blocked: PonyMail marks it as private. ` +
+    `By default, all private mailing lists are restricted to prevent ` +
+    `accidental ingestion of confidential content. If you are authorized, ` +
+    `opt in by adding "${addr}" (or a matching pattern) to ` +
+    `PONYMAIL_ALLOWED_LISTS.`
   );
 }
 
@@ -95,4 +155,8 @@ export function isRestricted(list, domain) {
 
 export function listRestrictions() {
   return [...RESTRICTED];
+}
+
+export function listAllowed() {
+  return [...ALLOWED];
 }

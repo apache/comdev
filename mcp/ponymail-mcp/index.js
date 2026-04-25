@@ -8,7 +8,11 @@ import {
   restrictionFor,
   restrictionForAddress,
   restrictionError,
+  isPrivateBlocked,
+  privateError,
   listRestrictions,
+  listAllowed,
+  allowedFor,
 } from "./restrictions.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
@@ -99,8 +103,14 @@ server.tool(
       lines.push(`## ${domain}`);
       for (const [listName, count] of Object.entries(domainLists)) {
         const desc = descriptions[`${listName}@${domain}`] || "";
+        const allowed = allowedFor(listName, domain);
         const restricted = restrictionFor(listName, domain);
-        const marker = restricted ? " [RESTRICTED — blocked by server policy]" : "";
+        let marker = "";
+        if (allowed) {
+          marker = " [ALLOW-LISTED — opted in via PONYMAIL_ALLOWED_LISTS]";
+        } else if (restricted) {
+          marker = " [RESTRICTED — blocked by server policy]";
+        }
         lines.push(`  - ${listName}: ${count} messages${desc ? " — " + desc : ""}${marker}`);
       }
     }
@@ -153,10 +163,39 @@ server.tool(
       header_subject: subject,
       header_body: body,
     };
-    if (quick) params.quick = "";
-    if (emails_only) params.emailsOnly = "";
+    if (quick) params.quick = "1";
+    if (emails_only) params.emailsOnly = "1";
 
     const data = await apiFetch("/api/stats.lua", params);
+
+    // Defence-in-depth: PonyMail tags private lists with `private: true`.
+    // Block unless the caller has opted in via PONYMAIL_ALLOWED_LISTS.
+    if (isPrivateBlocked(list, domain, data?.private)) {
+      return {
+        content: [{ type: "text", text: privateError(list, domain) }],
+        isError: true,
+      };
+    }
+
+    // Also scan individual emails — a cross-listed message can carry its
+    // origin list's `private: true` even when the queried list isn't private.
+    const emailsForCheck = data?.emails
+      ? Array.isArray(data.emails)
+        ? data.emails
+        : Object.values(data.emails)
+      : [];
+    for (const e of emailsForCheck) {
+      if (!e?.private) continue;
+      const { list: eList, domain: eDomain } = extractListDomain(e);
+      if (isPrivateBlocked(eList || list, eDomain || domain, e.private)) {
+        return {
+          content: [
+            { type: "text", text: privateError(eList || list, eDomain || domain) },
+          ],
+          isError: true,
+        };
+      }
+    }
 
     // Build a readable summary
     const lines = [];
@@ -216,6 +255,12 @@ server.tool(
     if (restricted) {
       return {
         content: [{ type: "text", text: restrictionError(list, domain, restricted) }],
+        isError: true,
+      };
+    }
+    if (isPrivateBlocked(list, domain, data?.private)) {
+      return {
+        content: [{ type: "text", text: privateError(list, domain) }],
         isError: true,
       };
     }
@@ -282,6 +327,12 @@ server.tool(
         isError: true,
       };
     }
+    if (isPrivateBlocked(rList || list, rDomain || domain, root?.private)) {
+      return {
+        content: [{ type: "text", text: privateError(rList || list, rDomain || domain) }],
+        isError: true,
+      };
+    }
 
     const lines = [];
     lines.push(`# Thread: ${root.subject || "(no subject)"}`);
@@ -309,15 +360,35 @@ server.tool(
     subject: z.string().optional().describe("Filter by subject words"),
   },
   async ({ list, date, from: fromAddr, subject }) => {
+    const at = list.indexOf("@");
+    const lp = at >= 0 ? list.slice(0, at) : list;
+    const dp = at >= 0 ? list.slice(at + 1) : "";
+
     const restricted = restrictionForAddress(list);
     if (restricted) {
-      const at = list.indexOf("@");
-      const lp = at >= 0 ? list.slice(0, at) : list;
-      const dp = at >= 0 ? list.slice(at + 1) : "";
       return {
         content: [{ type: "text", text: restrictionError(lp, dp, restricted) }],
         isError: true,
       };
+    }
+
+    // Pre-flight check: mbox returns raw text so we can't inspect a `private`
+    // flag on the response. Query stats.lua first to learn whether PonyMail
+    // marks this list as private. Skipped when the list is allow-listed.
+    if (lp && dp && !allowedFor(lp, dp)) {
+      try {
+        const meta = await apiFetch("/api/stats.lua", { list: lp, domain: dp, quick: "1" });
+        if (isPrivateBlocked(lp, dp, meta?.private)) {
+          return {
+            content: [{ type: "text", text: privateError(lp, dp) }],
+            isError: true,
+          };
+        }
+      } catch {
+        // If the metadata probe fails, fall through — the mbox fetch itself
+        // will surface a meaningful error, and pattern-based restrictions
+        // already covered the well-known private list names.
+      }
     }
 
     const params = {
@@ -455,25 +526,49 @@ server.tool(
 // --- Tool: list_restrictions ------------------------------------------------
 server.tool(
   "list_restrictions",
-  "Show the mailing list patterns this server refuses to access. " +
-    "Patterns can be 'prefix@' (matches across all domains), '@domain' (all " +
-    "lists in a domain), or exact 'prefix@domain'. Configured via the " +
-    "PONYMAIL_RESTRICTED_LISTS env var.",
+  "Show the mailing list policy: pattern blocks, the response-level private " +
+    "flag block, and any allow-listed opt-ins. Patterns are 'prefix@' " +
+    "(across all domains), '@domain' (whole domain), or exact 'prefix@domain'. " +
+    "Configured via PONYMAIL_RESTRICTED_LISTS and PONYMAIL_ALLOWED_LISTS.",
   {},
   async () => {
     const patterns = listRestrictions();
+    const allowed = listAllowed();
     const lines = [];
+
+    lines.push("## Default block policy");
+    lines.push(
+      "Any list PonyMail marks as `private: true` is blocked, even if it " +
+        "doesn't match a pattern below. Allow-listed lists bypass both this " +
+        "check and the pattern blocks."
+    );
+    lines.push("");
+
     if (patterns.length === 0) {
-      lines.push("No restrictions configured. All lists accessible (subject to auth).");
+      lines.push("## Restricted list patterns");
+      lines.push("(none)");
     } else {
       lines.push("## Restricted list patterns");
       for (const p of patterns) lines.push(`  - ${p}`);
-      lines.push("");
-      lines.push(
-        "Override with PONYMAIL_RESTRICTED_LISTS (comma-separated). " +
-          'Set to "none" to disable all restrictions.'
-      );
     }
+    lines.push("");
+    lines.push(
+      "Override patterns with PONYMAIL_RESTRICTED_LISTS (comma-separated). " +
+        'Set to "none" to clear all pattern blocks.'
+    );
+    lines.push("");
+
+    lines.push("## Allow-listed (opt-in) patterns");
+    if (allowed.length === 0) {
+      lines.push("(none — all private lists are blocked)");
+    } else {
+      for (const p of allowed) lines.push(`  - ${p}`);
+    }
+    lines.push("");
+    lines.push(
+      "Add allow-listed lists via PONYMAIL_ALLOWED_LISTS (comma-separated)."
+    );
+
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
