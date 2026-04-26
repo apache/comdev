@@ -38,13 +38,72 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 |----------|---------|-------------|
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
-| `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated list of list patterns to block. Set to `none` to disable. |
+| `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
+| `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |
 
 ## Restricted Lists
 
-Some mailing lists contain confidential Foundation business or PMC-private
-discussions. Even when an authenticated session would grant access, this
-server blocks them by default so an LLM cannot accidentally ingest them.
+By default, this server blocks **all private mailing lists** — including
+project-private (PMC) lists, security lists, and Foundation-private lists —
+so an LLM cannot accidentally ingest confidential content.
+
+### Why this matters: PII and ASF policy (interim guidance)
+
+Private ASF mailing lists frequently carry personally identifiable information
+(PII) — full names tied to private opinions, contact details, sensitive HR-style
+discussions (e.g. PMC membership debates), legal correspondence, and reports of
+member or community misconduct. Feeding this content to an LLM — particularly
+a hosted/third-party LLM where prompts may be logged, cached, or used to
+improve models — is materially different from a human reading the same archive.
+
+The current ASF baseline is set out on the [ASF Mailing Lists page][asf-lists]
+("Be sure not to take emails from private discussions or mailing lists into a
+public forum or list unless there is agreement by all parties to the
+conversation") and the [ASF Privacy Policy][asf-privacy]. Neither yet addresses
+LLM use specifically. Until that interim period ends and clearer rules exist,
+**the safe default is to block all private lists** at this MCP layer. This
+document will be updated as ASF guidance evolves.
+
+[asf-lists]: https://www.apache.org/foundation/mailinglists.html
+[asf-privacy]: https://privacy.apache.org/policies/privacy-policy-public.html
+
+A few practical points to keep in mind:
+
+- **You are responsible for compliance.** Whether or not the server blocks a
+  list, it remains *your* responsibility, as the operator of the MCP client,
+  to ensure you have permission to feed any list content to an LLM under
+  current ASF policy and the expectations of the people who wrote those
+  emails. The default block is a safety net, not a legal opinion.
+- **Hosted vs. local LLMs change the risk.** A local LLM (e.g. running on
+  your own machine where prompts never leave your control) carries
+  meaningfully less data-handling risk than a hosted model whose provider
+  may retain prompts. If you opt in to a private list, prefer an environment
+  where you can be confident PII is not shared with anyone outside the
+  list's intended audience.
+- **Not all "private" lists are equally sensitive.** Lists like
+  `security@<project>.apache.org` are private because they coordinate
+  vulnerability response, but the content tends to be technical/operational
+  ("work-related") rather than personal. They are *likely* — but not
+  guaranteed — to attract fewer policy restrictions than lists such as
+  `private@<project>.apache.org`, which routinely contain PMC membership
+  discussions, candidate evaluations, and other PII-heavy material. Do not
+  treat this as a blanket green light: case-by-case judgement is still
+  required.
+- **Opt-in lists you are *sure* are fine.** Use `PONYMAIL_ALLOWED_LISTS`
+  to allow only lists where you have permission, the content is safe to
+  process, and your LLM environment matches that risk level.
+
+### How the block works
+
+Two layers of defense:
+
+1. **Pattern blocks** (pre-fetch). Well-known private list names are blocked
+   before the API is called. See `PONYMAIL_RESTRICTED_LISTS` below.
+2. **Private-flag block** (post-fetch). PonyMail tags private lists and
+   messages with `private: true`. Any response carrying that flag is blocked,
+   even if the list name doesn't match a known pattern (catches unusually
+   named PMC lists). For `get_mbox`, a metadata probe runs first since the
+   mbox endpoint returns raw text.
 
 **Default blocked patterns:**
 
@@ -55,17 +114,50 @@ server blocks them by default so an LLM cannot accidentally ingest them.
   `executive-officers@apache.org`, `president@apache.org`,
   `chairman@apache.org`, `secretary@apache.org`, `treasurer@apache.org`
 
-**Pattern forms** (used in `PONYMAIL_RESTRICTED_LISTS`):
+**Pattern forms** (used in both `PONYMAIL_RESTRICTED_LISTS` and `PONYMAIL_ALLOWED_LISTS`):
 
 | Form | Meaning |
-|------|---------| 
+|------|---------|
 | `prefix@` | Any list with that local part (e.g. `private@` matches every `private@*`) |
 | `@domain` | All lists in that domain |
 | `prefix@domain` | Exact match |
 
-Setting `PONYMAIL_RESTRICTED_LISTS` replaces the defaults entirely. To
-preserve a default pattern while adding your own, include it in the value.
-Use `list_restrictions` from the MCP client to see what is currently active.
+Setting `PONYMAIL_RESTRICTED_LISTS` replaces the default patterns entirely.
+To preserve a default pattern while adding your own, include it in the value.
+
+### Opting in to private lists
+
+If you are authorized to access a private list, opt in with
+`PONYMAIL_ALLOWED_LISTS`. Allow-listed lists bypass **both** the pattern
+block and the private-flag block.
+
+The expected first users of this MCP are project committers triaging their
+own project's `security@` list — the content is technical/operational
+("work-related" CVE coordination) and tends to be lower PII risk than
+membership-style `private@` lists, while still requiring authentication.
+Opting in to your project's `security@` is typically the simplest starting
+point:
+
+```
+# Apache Airflow committer triaging their own security list
+PONYMAIL_ALLOWED_LISTS="security@airflow.apache.org"
+
+# Apache Arrow committer triaging their own security list
+PONYMAIL_ALLOWED_LISTS="security@arrow.apache.org"
+
+# Combine multiple lists (comma-separated)
+PONYMAIL_ALLOWED_LISTS="security@airflow.apache.org,security@arrow.apache.org"
+
+# Opt in to every list in a domain you administer
+PONYMAIL_ALLOWED_LISTS="@yourproject.apache.org"
+```
+
+Only opt in to a list if you are authorized to access it *and* your LLM
+environment is appropriate for the content (see "Why this matters" above —
+hosted vs. local LLM, prompt logging, etc.).
+
+Use `list_restrictions` from the MCP client to see the active policy and
+what is currently allow-listed.
 
 ## Authentication (Private Lists)
 
