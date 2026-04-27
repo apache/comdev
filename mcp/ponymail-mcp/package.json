@@ -6,7 +6,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test restrictions.test.js"
+    "test": "node --test --test-reporter=spec restrictions.test.js auth.test.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1"

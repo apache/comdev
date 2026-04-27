@@ -75,6 +75,17 @@ test("default restrictions allow ordinary lists", () => {
   assert.equal(out.user, null);
 });
 
+test("default restrictions match case-insensitively against input", () => {
+  const out = runInChild({}, `
+    return {
+      upperList: r.restrictionFor("PRIVATE", "Kafka.Apache.ORG"),
+      mixedDomain: r.restrictionFor("Board", "APACHE.ORG"),
+    };
+  `);
+  assert.equal(out.upperList, "private@");
+  assert.equal(out.mixedDomain, "board@apache.org");
+});
+
 test("PONYMAIL_RESTRICTED_LISTS=none clears all pattern blocks", () => {
   const out = runInChild({ PONYMAIL_RESTRICTED_LISTS: "none" }, `
     return {
@@ -237,6 +248,26 @@ test("restrictionForAddress handles list@domain strings", () => {
   assert.equal(out.malformed, null);
   assert.equal(out.empty, null);
   assert.equal(out.nullArg, null);
+});
+
+test("isRestricted is a thin boolean wrapper around restrictionFor", () => {
+  const out = runInChild({}, `
+    return {
+      privateKafka: r.isRestricted("private", "kafka.apache.org"),
+      devKafka: r.isRestricted("dev", "kafka.apache.org"),
+    };
+  `);
+  assert.equal(out.privateKafka, true);
+  assert.equal(out.devKafka, false);
+});
+
+test("restrictionError mentions the address and the matched pattern", () => {
+  const out = runInChild({}, `
+    return r.restrictionError("private", "kafka.apache.org", "private@");
+  `);
+  assert.match(out, /private@kafka\.apache\.org/);
+  assert.match(out, /"private@"/);
+  assert.match(out, /PONYMAIL_RESTRICTED_LISTS|PONYMAIL_ALLOWED_LISTS/);
 });
 
 test("parsePatternList handles whitespace, blanks, and mixed case", () => {
