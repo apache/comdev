@@ -150,16 +150,6 @@ def save_content(content, output_dir, month):
         logger.error(f"Error saving summary to {filepath}: {e}")
         return None
 
-def send_notification(title, message):
-    """Send a macOS desktop notification"""
-    try:
-        import subprocess
-        script = f'display notification "{message}" with title "{title}"'
-        subprocess.run(["osascript", "-e", script], check=True)
-        logger.info(f"Desktop notification sent: {title} - {message}")
-    except Exception as e:
-        logger.error(f"Failed to send desktop notification: {e}")
-
 def main():
     """Main function to fetch Apache project birthdays and generate a monthly summary"""
     logger.info("Starting Apache project birthdays fetch")
@@ -175,7 +165,6 @@ def main():
     
     if not committees_data:
         logger.error("Failed to fetch committees data")
-        send_notification("Apache Birthdays Fetch Failed", "Failed to fetch committees data")
         return
     
     # Get projects with birthdays in the current month
@@ -191,10 +180,6 @@ def main():
     # Log completion
     logger.info(f"Found {total_projects} projects with birthdays in {month_name}")
     logger.info("Apache project birthdays fetch completed")
-    
-    # Send notification
-    notification_message = f"Found {total_projects} Apache projects with birthdays in {month_name}"
-    send_notification("Apache Project Birthdays Summary Complete", notification_message)
     
     # Print path to the generated file
     if filepath:
