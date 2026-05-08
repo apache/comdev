@@ -1,3 +1,5 @@
 asf-highlights/birthdays/
 project-activity/DATA/
 project-activity/REPORTS/
+node_modules/
+package-lock.json
