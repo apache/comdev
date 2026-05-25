@@ -161,32 +161,58 @@ what is currently allow-listed.
 
 ## Authentication (Private Lists)
 
-Public lists work without authentication. For private/restricted lists, you have two options:
+Public lists work without authentication. For private/restricted lists:
 
-### Option 1: OAuth via Login Tool (Recommended)
+### Option 1: `login` tool — paste from DevTools (Default, Recommended)
 
-Use the `login` tool from within your MCP client. It will:
+From your MCP client, call the `login` tool. It opens a local helper page at `http://localhost:39817` with a paste form:
 
-1. Open a local helper page at `http://localhost:39817`
-2. The page links to PonyMail's login page — log in with your ASF LDAP credentials
-3. After logging in, grab the session cookie (see below) and paste it into the form
-4. The server validates the cookie and caches it to `~/.ponymail-mcp/session.json`
+1. On `lists.apache.org` (while logged in), open DevTools (`Cmd+Option+I` / `F12`).
+2. Go to the **Network** tab and reload the page.
+3. Click on any request (e.g. the document or any `api/` call).
+4. In **Headers** → **Request Headers** → find the **Cookie:** line.
+5. Copy the `ponymail=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` part and paste it into the form.
 
-**Finding the HttpOnly cookie:** The `ponymail` cookie is `HttpOnly`, so `document.cookie` and the Application tab won't show it. To find it:
-1. On `lists.apache.org` (while logged in), open DevTools (`Cmd+Option+I` / `F12`)
-2. Go to the **Network** tab and reload the page
-3. Click on any request (e.g., the page itself, or any `api/` call)
-4. In **Headers** → **Request Headers** → find the **Cookie:** line
-5. Copy the `ponymail=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` part
-### Option 2: Manual Cookie
+The cookie is validated against `/api/preferences.lua` and cached to `~/.ponymail-mcp/session.json`.
 
-1. Log into https://lists.apache.org in your browser
-2. Open DevTools → Application → Cookies → copy the session cookie
-3. Set the environment variable:
+### Option 2: Cookie via environment variable
+
+1. Get the cookie as above (DevTools → Network → Request Headers → Cookie).
+2. Set the environment variable in your MCP server config:
    ```
    PONYMAIL_SESSION_COOKIE="ponymail=abc123..."
    ```
-4. Add it to your MCP server config's environment variables
+
+The env var always wins over the cached session file.
+
+### Option 3 (OPT-IN, ADVANCED): auto-extract from Chrome cookie store
+
+> [!CAUTION]
+> **Only enable this if you are running this MCP server under additional isolation (sandboxing, a hardened launcher such as Apache Magpie, or equivalent) and you understand the security tradeoff. Do NOT enable it on a bare install.**
+>
+> When `PONYMAIL_AUTO_EXTRACT_COOKIE=1` is set, the `login` tool will, before showing the paste form, do **two things that grant the MCP server broad access to your system**:
+>
+> 1. **Read your local Chrome cookie database** (`~/Library/Application Support/Google/Chrome/<Profile>/Cookies` and the equivalent paths for Chromium-family browsers like Brave, Edge, Vivaldi, Arc, Opera). That file contains session cookies for **every site** you are logged in to in Chrome, not just lists.apache.org. The code only ever queries the single row for `host=lists.apache.org / name=ponymail`, but the OS-level read permission you are granting is "the entire cookie file".
+> 2. **Access your macOS Keychain entry "Chrome Safe Storage"** via `/usr/bin/security` to obtain the AES key that decrypts cookie values. macOS will prompt you for keychain approval on first use; once granted, the MCP process can decrypt **any** cookie value in the Chrome DB.
+>
+> Both capabilities are far broader than this MCP server actually needs. The auto-extract path is a convenience that only makes sense when the MCP process itself is wrapped in a sandbox / security layer that mediates which files and keychain items it can touch. **If you do not have such a layer, leave `PONYMAIL_AUTO_EXTRACT_COOKIE` unset and use the paste flow.**
+>
+> Note: Firefox and Safari were evaluated and removed. Both browsers' anti-tracking features (Firefox Bounce Tracking Protection 109+; Safari ITP) hold OAuth-derived session cookies in memory only and never persist them to the on-disk cookie store, so there is nothing for an extractor to read.
+
+To enable, add to your MCP server config:
+
+```jsonc
+{
+  "env": {
+    "PONYMAIL_AUTO_EXTRACT_COOKIE": "1"
+    // ... other env vars
+  }
+}
+```
+
+When this opt-in is active, the server prints a multi-line warning to stderr at startup so you can see in your MCP client's logs that the elevated mode is on. If the cookie isn't found in Chrome (or decryption fails — for instance Chrome ≥ ~127 may use App-Bound Encryption `v20` which we can't unwrap from Node), the tool falls back to the paste form.
+
+---
 
 Sessions expire after ~20 hours. Use `auth_status` to check, `logout` to clear.
 
