@@ -50,7 +50,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 ## Requirements
 
-- Node.js 18 or later  
+- Node.js 20 or later  
 - An MCP-compatible client  
 
 ## Installation
