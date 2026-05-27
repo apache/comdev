@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadSession, performLogin, clearSession } from "./auth.js";
+import { loadSession, performLogin, clearSession, autoExtractEnabled } from "./auth.js";
 import {
   restrictionFor,
   restrictionForAddress,
@@ -16,6 +16,30 @@ import {
 } from "./restrictions.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
+
+// Loud, opt-in security notice. When the user has enabled the auto-extract
+// path via PONYMAIL_AUTO_EXTRACT_COOKIE=1, remind them at every startup what
+// they have just granted the MCP process. Goes to stderr so it shows up in
+// MCP client logs without polluting the JSON-RPC stdout channel.
+if (autoExtractEnabled()) {
+  console.error(
+    "\n" +
+    "########################################################################\n" +
+    "# PonyMail MCP — AUTO COOKIE EXTRACTION IS ENABLED                     #\n" +
+    "#                                                                      #\n" +
+    "# PONYMAIL_AUTO_EXTRACT_COOKIE=1 is set. On `login`, this server will: #\n" +
+    "#   1. Read the local Chrome cookie database                           #\n" +
+    "#      (contains session cookies for EVERY site you use in Chrome).    #\n" +
+    "#   2. Access the macOS Keychain entry 'Chrome Safe Storage' to        #\n" +
+    "#      decrypt cookie values. macOS may prompt you to approve this.    #\n" +
+    "#                                                                      #\n" +
+    "# Only enable this if the MCP server is running under additional       #\n" +
+    "# isolation you trust (e.g. a sandbox / hardened launcher such as      #\n" +
+    "# Apache Magpie). Otherwise unset PONYMAIL_AUTO_EXTRACT_COOKIE and use #\n" +
+    "# the paste-from-DevTools fallback instead.                            #\n" +
+    "########################################################################\n"
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -410,19 +434,37 @@ server.tool(
 // --- Tool: login ------------------------------------------------------------
 server.tool(
   "login",
-  "Authenticate with Apache's OAuth system to access private mailing lists. " +
-    "Opens a browser window for ASF LDAP login, then caches the session cookie. " +
-    "Only needed for private/restricted lists — public lists work without auth.",
+  "Authenticate to access private mailing lists. Opens a local helper page " +
+    "where you paste the ponymail session cookie copied from DevTools on " +
+    "lists.apache.org. Only needed for private/restricted lists — public " +
+    "lists work without auth.\n\n" +
+    "OPTIONAL: if the MCP server was started with the env var " +
+    "PONYMAIL_AUTO_EXTRACT_COOKIE=1, this tool will FIRST try to read the " +
+    "cookie out of the local Chrome cookie store (decrypting via macOS " +
+    "Keychain) and only fall back to the paste form if that fails. That " +
+    "path grants the MCP server broad access to your Chrome cookies and " +
+    "Keychain — only enable it if the MCP is running under additional " +
+    "isolation you trust (e.g. Apache Magpie or a similar sandbox).",
   {},
   async () => {
     try {
-      const cookie = await performLogin(BASE_URL);
+      const result = await performLogin(BASE_URL);
+      const who = result.user
+        ? ` as ${result.user.fullname}${result.user.email ? ` (${result.user.email})` : ""}`
+        : "";
+      const sourceLabel =
+        result.source === "browser"
+          ? "Cookie auto-extracted from local Chrome cookie store (opt-in via PONYMAIL_AUTO_EXTRACT_COOKIE)."
+          : "Cookie received from the paste form.";
       return {
         content: [
           {
             type: "text",
-            text: "✅ Successfully authenticated! Session cookie cached.\n\n" +
-              "You can now access private mailing lists. Session expires after ~20 hours.\n" +
+            text:
+              `✅ Successfully authenticated${who}.\n\n` +
+              `${sourceLabel}\n` +
+              "Session cached. You can now access private mailing lists. " +
+              "Session expires after ~20 hours.\n" +
               "Use `auth_status` to check, `logout` to clear.",
           },
         ],
