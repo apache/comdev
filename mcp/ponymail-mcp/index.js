@@ -168,8 +168,23 @@ server.tool(
     body: z.string().optional().describe("Filter by body text"),
     quick: z.boolean().optional().describe("If true, return statistics only (faster)"),
     emails_only: z.boolean().optional().describe("If true, return email summaries only (skip thread_struct, participants, word cloud)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Maximum email summaries to return in the rendered output (default 30, max 200). The backend always returns the full hit set; this only caps how many are formatted into the response."),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Number of email summaries to skip before rendering (default 0). Combine with `limit` to page through a large result set without re-querying the backend."),
   },
-  async ({ list, domain, query, timespan, from, subject, body, quick, emails_only }) => {
+  async ({ list, domain, query, timespan, from, subject, body, quick, emails_only, limit, offset }) => {
+    const pageLimit = limit ?? 30;
+    const pageOffset = offset ?? 0;
     const restricted = restrictionFor(list, domain);
     if (restricted) {
       return {
@@ -246,14 +261,26 @@ server.tool(
       const emails = Array.isArray(data.emails)
         ? data.emails
         : Object.values(data.emails);
-      for (const e of emails.slice(0, 30)) {
+      const total = emails.length;
+      const start = Math.min(pageOffset, total);
+      const end = Math.min(start + pageLimit, total);
+      const windowed = emails.slice(start, end);
+      for (const e of windowed) {
         const date = e.date || new Date((e.epoch || 0) * 1000).toISOString().slice(0, 10);
         lines.push(`- **${e.subject}**`);
         lines.push(`  From: ${e.from} | Date: ${date} | ID: ${e.id || e.mid}`);
       }
       lines.push("");
-      if (emails.length > 30) {
-        lines.push(`... and ${emails.length - 30} more emails`);
+      if (total === 0) {
+        // no-op; the empty "## Emails" header is enough signal
+      } else if (windowed.length === 0) {
+        lines.push(`Showing 0 of ${total} (offset ${pageOffset} is past the end).`);
+      } else {
+        lines.push(`Showing ${start + 1}-${end} of ${total}.`);
+        if (end < total) {
+          const nextOffset = end;
+          lines.push(`... ${total - end} more emails. Re-query with offset=${nextOffset} to continue.`);
+        }
       }
     }
 
