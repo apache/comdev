@@ -2,5 +2,5 @@ asf-highlights/birthdays/
 project-activity/DATA/
 project-activity/REPORTS/
 node_modules/
-package-lock.json
-mcp/apache-projects-mcp/node_modules/
+__pycache__/
+*.pyc

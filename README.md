@@ -14,4 +14,3 @@ Contents of this repository:
 
 * asf-highlights - tools for finding foundation-wide activity
 * project-activities - tools for project-specific activity
-

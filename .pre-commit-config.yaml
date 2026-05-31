@@ -1,0 +1,94 @@
+# prek / pre-commit configuration.
+# Docs: https://github.com/j178/prek  and  https://pre-commit.com/
+#
+# One-time setup (see AGENTS.md):
+#   uv tool install prek
+#   prek install -t pre-commit -t commit-msg -t pre-push
+#
+# Run manually:
+#   prek run --all-files                        # fast checks (headers, yaml, ...)
+#   prek run --all-files --hook-stage pre-push  # full suite (tests, licenses, zizmor)
+
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+
+exclude: |
+  (?x)^(
+    (.*/)?node_modules/.*|
+    (.*/)?package-lock\.json|
+    (.*/)?LICENSE|
+    \.github/license-header\.txt
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: check-executables-have-shebangs
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.37.2
+    hooks:
+      - id: check-github-workflows
+      - id: check-dependabot
+
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.6
+    hooks:
+      - id: insert-license
+        name: insert license header (python/shell)
+        files: \.(py|sh)$
+        args:
+          - --license-filepath=.github/license-header.txt
+          - --comment-style=#
+      - id: insert-license
+        name: insert license header (javascript)
+        files: \.m?js$
+        args:
+          - --license-filepath=.github/license-header.txt
+          - --comment-style=//
+      - id: insert-license
+        name: insert license header (html)
+        files: \.html$
+        args:
+          - --license-filepath=.github/license-header.txt
+          - --comment-style=<!--|  |-->
+
+  - repo: local
+    hooks:
+      - id: no-coauthored-by
+        name: reject Co-authored-by trailers
+        entry: scripts/check-no-coauthor.sh
+        language: script
+        stages: [commit-msg]
+
+      - id: mcp-tests
+        name: MCP server tests (pre-push)
+        entry: bash -c 'for d in mcp/*/; do (cd "$d" && npm test) || exit 1; done'
+        language: system
+        pass_filenames: false
+        files: ^mcp/
+        stages: [pre-push]
+
+      - id: license-allowlist
+        name: dependency license allowlist (pre-push)
+        entry: bash -c 'for d in mcp/*/; do node scripts/check-licenses.mjs "$d" || exit 1; done'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: zizmor
+        name: zizmor GitHub Actions lint (pre-push)
+        entry: uvx zizmor .github/workflows
+        language: system
+        pass_filenames: false
+        files: ^\.github/
+        stages: [pre-push]
