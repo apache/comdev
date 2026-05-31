@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "licenses": "node ../../scripts/check-licenses.mjs ."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

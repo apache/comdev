@@ -8,16 +8,16 @@ This server provides a simple way for MCP clients to explore ASF committees, peo
 
 The server currently provides tools to:
 
-- list and search Apache project committees  
-- get detailed committee information  
-- search for ASF committers and members  
-- get details about a specific person by Apache ID  
-- list current Incubator podlings  
-- get release history for a project  
-- list members of an ASF LDAP group  
-- find source code repositories for a project  
-- search across Apache top-level projects and podlings  
-- return ASF-wide summary statistics  
+- list and search Apache project committees
+- get detailed committee information
+- search for ASF committers and members
+- get details about a specific person by Apache ID
+- list current Incubator podlings
+- get release history for a project
+- list members of an ASF LDAP group
+- find source code repositories for a project
+- search across Apache top-level projects and podlings
+- return ASF-wide summary statistics
 
 ## Data sources
 
@@ -50,8 +50,8 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 ## Requirements
 
-- Node.js 20 or later  
-- An MCP-compatible client  
+- Node.js 20 or later
+- An MCP-compatible client
 
 ## Installation
 
@@ -94,15 +94,15 @@ Adjust the path to match your local checkout.
 
 Once configured in an MCP client, you can ask things like:
 
-- “List projects related to data or storage”  
-- “Show me the PMC roster for Iceberg”  
-- “Find ASF committers named Justin”  
-- “What releases has Apache Spark had recently?”  
-- “Which repositories match Kafka?”  
-- “Search Apache projects related to security”  
+- “List projects related to data or storage”
+- “Show me the PMC roster for Iceberg”
+- “Find ASF committers named Justin”
+- “What releases has Apache Spark had recently?”
+- “Which repositories match Kafka?”
+- “Search Apache projects related to security”
 
 ## Notes and limitations
 
-- Data comes from `projects.apache.org/json`, not directly from Git repositories, mailing lists, or podling status reports.  
-- Podling data is limited to the current contents of `podlings.json`.  
-- Data is cached for 6 hours in memory, so updates on the source side may not appear immediately.  
+- Data comes from `projects.apache.org/json`, not directly from Git repositories, mailing lists, or podling status reports.
+- Podling data is limited to the current contents of `podlings.json`.
+- Data is cached for 6 hours in memory, so updates on the source side may not appear immediately.

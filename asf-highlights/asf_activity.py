@@ -1,4 +1,21 @@
 #!/usr/bin/env -S uv run --script
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # /// script
 # dependencies = ["httpx"]
 # ///
@@ -17,16 +34,16 @@ def get_date_range():
 def find_committers(md=False):
     people_data = httpx.get("https://projects.apache.org/json/foundation/people.json").json()
     ldap_data = httpx.get("https://whimsy.apache.org/public/public_ldap_people.json").json()
-    
+
     last_month_start, last_month_end = get_date_range()
     new_committers = defaultdict(list)
-    
+
     for person_id, person_info in people_data.items():
         if person_id not in ldap_data["people"]:
             continue
-        
+
         created = datetime.strptime(ldap_data["people"][person_id]["createTimestamp"], "%Y%m%d%H%M%SZ")
-        
+
         if last_month_start <= created <= last_month_end:
             for group in person_info.get("groups", []):
                 if not group.endswith("-pmc") and group not in ["apldap", "incubator"]:
@@ -35,7 +52,7 @@ def find_committers(md=False):
                         "id": person_id,
                         "date": created.strftime("%Y-%m-%d")
                     })
-    
+
     if new_committers:
         total = sum(len(c) for c in new_committers.values())
         if md:
@@ -59,43 +76,43 @@ def find_committers(md=False):
 def find_pmc(md=False):
     committee_data = httpx.get("https://whimsy.apache.org/public/committee-info.json").json()
     committees_data = httpx.get("https://projects.apache.org/json/foundation/committees.json").json()
-    
+
     last_month_start, last_month_end = get_date_range()
     reporting_month = last_month_start.strftime("%Y-%m")
     new_pmc_members = defaultdict(list)
     new_projects = set()
-    
+
     # Identify projects established in the reporting month
     for committee in committees_data:
         if committee.get("established") == reporting_month:
             new_projects.add(committee.get("id", "").lower())
-    
+
     for project_id, project_info in committee_data.get("committees", {}).items():
         if not project_info.get("pmc"):
             continue
-        
+
         for member_id, member_info in project_info.get("roster", {}).items():
             date_str = member_info.get("date")
             if not date_str:
                 continue
-            
+
             added = datetime.strptime(date_str, "%Y-%m-%d")
-            
+
             if last_month_start <= added <= last_month_end:
                 new_pmc_members[project_id].append({
                     "name": member_info.get("name", member_id),
                     "id": member_id,
                     "date": date_str
                 })
-    
+
     if new_pmc_members:
         total = sum(len(m) for m in new_pmc_members.values())
         new_project_members = sum(len(m) for p, m in new_pmc_members.items() if p in new_projects)
-        
+
         summary = f"In {last_month_start.strftime('%B, %Y')}, {len(new_pmc_members)} projects elected a total of {total} PMC members"
         if new_project_members > 0:
             summary += f". {new_project_members} of those are part of newly-established projects"
-        
+
         if md:
             print(f"## New PMC Members\n")
             print(summary + ".\n")
@@ -122,20 +139,20 @@ def find_pmc(md=False):
 
 def find_releases(md=False):
     releases_data = httpx.get("https://projects.apache.org/json/foundation/releases.json").json()
-    
+
     last_month_start, last_month_end = get_date_range()
     project_releases = defaultdict(list)
-    
+
     for project_id, releases in releases_data.items():
         for release_name, release_date_str in releases.items():
             release_date = datetime.strptime(release_date_str, "%Y-%m-%d")
-            
+
             if last_month_start <= release_date <= last_month_end:
                 project_releases[project_id].append({
                     "name": release_name,
                     "date": release_date_str
                 })
-    
+
     if project_releases:
         total = sum(len(r) for r in project_releases.values())
         if md:
@@ -158,7 +175,7 @@ def find_releases(md=False):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    
+
     if "-h" in args or "--help" in args:
         print("Usage: asf_activity.py [OPTIONS]")
         print("\nOptions:")
@@ -173,7 +190,7 @@ if __name__ == "__main__":
         print("  asf_activity.py committers")
         print("  asf_activity.py pmc releases --markdown")
         sys.exit(0)
-    
+
     markdown = "-m" in args or "--markdown" in args
     args = [a for a in args if a not in ("-m", "--markdown")]
 

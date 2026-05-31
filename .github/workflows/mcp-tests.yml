@@ -1,21 +1,23 @@
-name: ponymail-mcp tests
+name: MCP server tests
 
 on:
   push:
-    branches: ["main", "rbowen-ponymail-mcp"]
+    branches: ["main"]
     paths:
-      - "mcp/ponymail-mcp/**"
-      - ".github/workflows/ponymail-mcp-tests.yml"
+      - "mcp/**"
+      - "scripts/check-licenses.mjs"
+      - ".github/workflows/mcp-tests.yml"
   pull_request:
     paths:
-      - "mcp/ponymail-mcp/**"
-      - ".github/workflows/ponymail-mcp-tests.yml"
+      - "mcp/**"
+      - "scripts/check-licenses.mjs"
+      - ".github/workflows/mcp-tests.yml"
 
 permissions: {}
 
 jobs:
   test:
-    name: Test on Node ${{ matrix.node-version }}
+    name: ${{ matrix.project }} on Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -24,11 +26,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        project: ["ponymail-mcp", "apache-projects-mcp"]
         node-version: ["20", "22"]
 
     defaults:
       run:
-        working-directory: mcp/ponymail-mcp
+        working-directory: mcp/${{ matrix.project }}
 
     steps:
       - name: Checkout
@@ -42,7 +45,10 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci
 
       - name: Run tests
         run: npm test
+
+      - name: Check dependency licenses
+        run: npm run licenses

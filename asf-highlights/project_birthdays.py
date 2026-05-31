@@ -1,4 +1,21 @@
 #!/usr/bin/env -S uv run
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # /// script
 # requires-python = ">=3.8"
 # dependencies = [
@@ -65,28 +82,28 @@ def get_projects_with_birthdays(committees_data, month):
     Returns a dictionary with years as keys and lists of projects as values
     """
     birthday_projects = defaultdict(list)
-    
+
     for committee in committees_data:
         # Skip if no established date
         if "established" not in committee:
             continue
-            
+
         established = committee.get("established", "")
         if not established or "-" not in established:
             continue
-            
+
         try:
             est_year, est_month = established.split("-")
             est_month = int(est_month)
             est_year = int(est_year)
-            
+
             # Check if the project's birthday is in the target month
             if est_month == month:
                 project_name = committee.get("name", "Unknown Project")
                 project_id = committee.get("id", "")
                 homepage = committee.get("homepage", "")
                 description = committee.get("charter", "No description available")
-                
+
                 # Add project to the appropriate year group
                 birthday_projects[est_year].append({
                     "name": project_name,
@@ -99,48 +116,48 @@ def get_projects_with_birthdays(committees_data, month):
         except (ValueError, IndexError):
             # Skip entries with invalid date format
             continue
-    
+
     return birthday_projects
 
 def generate_birthday_summary(birthday_projects, month):
     """Generate a markdown summary of projects with birthdays in the specified month"""
     if not birthday_projects:
         return f"# Apache Project Birthdays - {get_month_name(month)} {CONFIG['current_year']}\n\nNo Apache projects were established in {get_month_name(month)}.\n"
-    
+
     month_name = get_month_name(month)
     summary = f"# Apache Project Birthdays - {month_name} {CONFIG['current_year']}\n\n"
     summary += f"The following Apache projects are celebrating their birthdays in {month_name}.\n\n"
-    
+
     # Sort years in descending order (newest first)
     sorted_years = sorted(birthday_projects.keys(), reverse=True)
-    
+
     for year in sorted_years:
         projects = birthday_projects[year]
         # Sort projects within each year by name
         projects.sort(key=lambda x: x["name"])
-        
+
         for project in projects:
             age = project["age"]
             age_suffix = "year" if age == 1 else "years"
-            
+
             summary += f"## {project['name']} ({age} {age_suffix})\n\n"
             summary += f"**Established:** {project['established']}\n\n"
             summary += f"**Description:** {project['description']}\n\n"
             summary += f"**Project Homepage:** {project['homepage']}\n\n"
             summary += "---\n\n"
-    
+
     return summary
 
 def save_content(content, output_dir, month):
     """Save the generated summary to a file"""
     if not content:
         return
-    
+
     month_name = get_month_name(month).lower()
     year = CONFIG["current_year"]
     filename = f"apache_birthdays_{year}_{month:02d}_{month_name}.md"
     filepath = output_dir / filename
-    
+
     try:
         with open(filepath, 'w') as f:
             f.write(content)
@@ -155,32 +172,32 @@ def main():
     logger.info("Starting Apache project birthdays fetch")
     output_dir = Path(CONFIG["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Get the current month or use the one specified in CONFIG
     month = CONFIG["current_month"]
     month_name = get_month_name(month)
-    
+
     # Fetch committees data
     committees_data = fetch_json_data(CONFIG["committees_url"])
-    
+
     if not committees_data:
         logger.error("Failed to fetch committees data")
         return
-    
+
     # Get projects with birthdays in the current month
     birthday_projects = get_projects_with_birthdays(committees_data, month)
-    
+
     # Generate and save birthday summary
     summary = generate_birthday_summary(birthday_projects, month)
     filepath = save_content(summary, output_dir, month)
-    
+
     # Count total projects
     total_projects = sum(len(projects) for projects in birthday_projects.values())
-    
+
     # Log completion
     logger.info(f"Found {total_projects} projects with birthdays in {month_name}")
     logger.info("Apache project birthdays fetch completed")
-    
+
     # Print path to the generated file
     if filepath:
         print(f"Birthday summary saved to: {filepath}")
