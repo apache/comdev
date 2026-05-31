@@ -4,6 +4,7 @@ notifications:
   issues: notifications@community.apache.org
 
 github:
+  homepage: https://community.apache.org/
   features:
     issues: true
   rulesets:
