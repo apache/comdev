@@ -272,8 +272,11 @@ server.tool(
       lines.push("");
     }
 
-    // Emails
-    if (data.emails) {
+    // Emails — `quick` mode is stats-only: PonyMail's quick response carries
+    // email objects without subject/from/id (issue #9), so skip the section
+    // entirely. Use `emails_only` to get email summaries. Fields are also
+    // guarded below so a sparse entry never renders as "undefined".
+    if (!quick && data.emails) {
       lines.push("## Emails");
       const emails = Array.isArray(data.emails)
         ? data.emails
@@ -284,8 +287,8 @@ server.tool(
       const windowed = emails.slice(start, end);
       for (const e of windowed) {
         const date = e.date || new Date((e.epoch || 0) * 1000).toISOString().slice(0, 10);
-        lines.push(`- **${e.subject}**`);
-        lines.push(`  From: ${e.from} | Date: ${date} | ID: ${e.id || e.mid}`);
+        lines.push(`- **${e.subject || "(no subject)"}**`);
+        lines.push(`  From: ${e.from || "(unknown sender)"} | Date: ${date} | ID: ${e.id || e.mid || "(no id)"}`);
       }
       lines.push("");
       if (total === 0) {
