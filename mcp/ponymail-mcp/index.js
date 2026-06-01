@@ -134,6 +134,7 @@ server.tool(
   "Get an overview of available mailing lists and their message counts. " +
     "Returns domain → list → count mappings.",
   {},
+  { readOnlyHint: true },
   async () => {
     const data = await apiFetch("/api/preferences.lua");
     const lists = data.lists || {};
@@ -199,6 +200,7 @@ server.tool(
       .optional()
       .describe("Number of email summaries to skip before rendering (default 0). Combine with `limit` to page through a large result set without re-querying the backend."),
   },
+  { readOnlyHint: true },
   async ({ list, domain, query, timespan, from, subject, body, quick, emails_only, limit, offset }) => {
     const pageLimit = limit ?? 30;
     const pageOffset = offset ?? 0;
@@ -318,6 +320,7 @@ server.tool(
   {
     id: z.string().describe("The email ID (mid) or Message-ID header value"),
   },
+  { readOnlyHint: true },
   async ({ id }) => {
     const data = await apiFetch("/api/email.lua", { id });
 
@@ -374,6 +377,7 @@ server.tool(
     list: z.string().describe("List prefix, e.g. 'dev', 'user'"),
     domain: z.string().describe("List domain, e.g. 'iceberg.apache.org'"),
   },
+  { readOnlyHint: true },
   async ({ id, list, domain }) => {
     const restrictedUp = restrictionFor(list, domain);
     if (restrictedUp) {
@@ -430,6 +434,7 @@ server.tool(
     from: z.string().optional().describe("Filter by sender email"),
     subject: z.string().optional().describe("Filter by subject words"),
   },
+  { readOnlyHint: true },
   async ({ list, date, from: fromAddr, subject }) => {
     const at = list.indexOf("@");
     const lp = at >= 0 ? list.slice(0, at) : list;
@@ -551,6 +556,7 @@ server.tool(
   "Check current authentication status. Shows whether a session cookie is " +
     "cached and if it's still valid.",
   {},
+  { readOnlyHint: true },
   async () => {
     const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
     const sessionCookie = envCookie || loadSession();
@@ -620,6 +626,7 @@ server.tool(
     "(across all domains), '@domain' (whole domain), or exact 'prefix@domain'. " +
     "Configured via PONYMAIL_RESTRICTED_LISTS and PONYMAIL_ALLOWED_LISTS.",
   {},
+  { readOnlyHint: true },
   async () => {
     const patterns = listRestrictions();
     const allowed = listAllowed();

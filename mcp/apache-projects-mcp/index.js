@@ -160,6 +160,7 @@ server.tool(
     ),
     limit: z.number().optional().describe("Max results to return (default 50)"),
   },
+  { readOnlyHint: true },
   async ({ query, limit }) => {
     const committees = await getData("committees");
     const max = limit || 50;
@@ -229,6 +230,7 @@ server.tool(
       "Committee ID (e.g. 'iceberg', 'httpd', 'spark')"
     ),
   },
+  { readOnlyHint: true },
   async ({ id }) => {
     const committees = await getData("committees");
     const c = committees.find(
@@ -294,6 +296,7 @@ server.tool(
     ),
     limit: z.number().optional().describe("Max results (default 20)"),
   },
+  { readOnlyHint: true },
   async ({ query, limit }) => {
     const people = await getData("people");
     const names = await getData("people_name");
@@ -346,6 +349,7 @@ server.tool(
   {
     id: z.string().describe("Apache ID (e.g. 'rbowen', 'jmclean')"),
   },
+  { readOnlyHint: true },
   async ({ id }) => {
     const people = await getData("people");
     const names = await getData("people_name");
@@ -392,6 +396,7 @@ server.tool(
   {
     query: z.string().optional().describe("Filter by name or description"),
   },
+  { readOnlyHint: true },
   async ({ query }) => {
     const podlings = await getData("podlings");
 
@@ -443,6 +448,7 @@ server.tool(
       "Project ID (e.g. 'iceberg', 'spark', 'httpd')"
     ),
   },
+  { readOnlyHint: true },
   async ({ project }) => {
     const releases = await getData("releases");
     const key = project.toLowerCase();
@@ -503,6 +509,7 @@ server.tool(
       "Group name, e.g. 'iceberg' (committers) or 'iceberg-pmc' (PMC members)"
     ),
   },
+  { readOnlyHint: true },
   async ({ group }) => {
     const groups = await getData("groups");
     const names = await getData("people_name");
@@ -562,6 +569,7 @@ server.tool(
       "Project name or keyword to search repos (e.g. 'iceberg', 'kafka')"
     ),
   },
+  { readOnlyHint: true },
   async ({ project }) => {
     const repos = await getData("repositories");
 
@@ -610,6 +618,7 @@ server.tool(
     query: z.string().describe("Search keyword"),
     limit: z.number().optional().describe("Max results (default 30)"),
   },
+  { readOnlyHint: true },
   async ({ query, limit }) => {
     const max = limit || 30;
     const committees = await getData("committees");
@@ -688,6 +697,7 @@ server.tool(
   "Get summary statistics about the ASF: total committees, podlings, people, " +
     "members, groups, and repositories.",
   {},
+  { readOnlyHint: true },
   async () => {
     const committees = await getData("committees");
     const podlings = await getData("podlings");
