@@ -321,6 +321,13 @@ export async function performLogin(baseUrl, opts = {}) {
 // ---------------------------------------------------------------------------
 
 export function loginPage(baseUrl) {
+  // PonyMail's oauth.html stashes document.referrer in sessionStorage on load
+  // and, after OAuth completes, redirects the user back to it (falling back to
+  // the list index "./" when there is no referrer). Since this helper page is
+  // served from http://localhost, an un-suppressed referrer would bounce the
+  // user straight back to *this* paste form after they log in. The step-1 link
+  // therefore carries rel="noreferrer" so PonyMail lands them on the real
+  // lists.apache.org index instead.
   const oauthUrl = `${baseUrl}/oauth.html`;
   const hostname = new URL(baseUrl).hostname;
   const autoOn = autoExtractEnabled();
@@ -408,7 +415,7 @@ export function loginPage(baseUrl) {
     <div class="step-body">
       <h2>Log in to ${hostname}</h2>
       <p>Skip if you're already logged in there.</p>
-      <a class="openlink" href="${oauthUrl}" target="_blank">Open ${hostname} →</a>
+      <a class="openlink" href="${oauthUrl}" target="_blank" rel="noreferrer">Open ${hostname} →</a>
     </div>
   </div>
 
