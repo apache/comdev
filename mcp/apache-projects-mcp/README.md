@@ -58,8 +58,8 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 Clone the repository and install dependencies:
 
 ```
-git clone https://github.com/rbowen/apache-projects-mcp.git
-cd apache-projects-mcp
+git clone https://github.com/apache/comdev.git
+cd comdev/mcp/apache-projects-mcp
 npm install
 ```
 
@@ -84,7 +84,7 @@ Example stdio configuration:
 ```
 {
   "command": "node",
-  "args": ["/Users/yourname/apache-projects-mcp/index.js"]
+  "args": ["/path/to/comdev/mcp/apache-projects-mcp/index.js"]
 }
 ```
 
