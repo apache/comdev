@@ -34,6 +34,10 @@ import {
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
+// API endpoint suffix. The legacy compat layer uses ".lua" (default),
+// while native Foal deployments use ".json".
+const API_SUFFIX = process.env.PONYMAIL_API_SUFFIX || ".lua";
+
 // Loud, opt-in security notice. When the user has enabled the auto-extract
 // path via PONYMAIL_AUTO_EXTRACT_COOKIE=1, remind them at every startup what
 // they have just granted the MCP process. Goes to stderr so it shows up in
@@ -136,7 +140,7 @@ server.tool(
   {},
   { readOnlyHint: true },
   async () => {
-    const data = await apiFetch("/api/preferences.lua");
+    const data = await apiFetch(`/api/preferences${API_SUFFIX}`);
     const lists = data.lists || {};
     const descriptions = data.descriptions || {};
 
@@ -224,7 +228,7 @@ server.tool(
     if (quick) params.quick = "1";
     if (emails_only) params.emailsOnly = "1";
 
-    const data = await apiFetch("/api/stats.lua", params);
+    const data = await apiFetch(`/api/stats${API_SUFFIX}`, params);
 
     // Defence-in-depth: PonyMail tags private lists with `private: true`.
     // Block unless the caller has opted in via PONYMAIL_ALLOWED_LISTS.
@@ -322,7 +326,7 @@ server.tool(
   },
   { readOnlyHint: true },
   async ({ id }) => {
-    const data = await apiFetch("/api/email.lua", { id });
+    const data = await apiFetch(`/api/email${API_SUFFIX}`, { id });
 
     const { list, domain } = extractListDomain(data);
     const restricted = list && domain ? restrictionFor(list, domain) : null;
@@ -370,16 +374,19 @@ server.tool(
 // --- Tool: get_thread -------------------------------------------------------
 server.tool(
   "get_thread",
-  "Fetch all emails in a thread. Provide the thread ID (tid) from a search result " +
-    "or email. Returns the thread as a flat list of email summaries.",
+  "Fetch all emails in a thread. Provide the email ID (mid/permalink) from a " +
+    "search result or email. Returns the full threaded tree and a flat list of " +
+    "all emails in the conversation. Optionally use find_parent to navigate up " +
+    "to the thread root from any message in the thread.",
   {
-    id: z.string().describe("The thread ID (tid)"),
-    list: z.string().describe("List prefix, e.g. 'dev', 'user'"),
-    domain: z.string().describe("List domain, e.g. 'iceberg.apache.org'"),
+    id: z.string().describe("The email ID (mid/permalink) — the thread root or any message in the thread"),
+    list: z.string().optional().describe("List prefix for restriction checks, e.g. 'dev', 'user'"),
+    domain: z.string().optional().describe("List domain for restriction checks, e.g. 'iceberg.apache.org'"),
+    find_parent: z.boolean().optional().describe("If true, navigate up to the thread root before fetching the full thread"),
   },
   { readOnlyHint: true },
-  async ({ id, list, domain }) => {
-    const restrictedUp = restrictionFor(list, domain);
+  async ({ id, list, domain, find_parent }) => {
+    const restrictedUp = list && domain ? restrictionFor(list, domain) : null;
     if (restrictedUp) {
       return {
         content: [{ type: "text", text: restrictionError(list, domain, restrictedUp) }],
@@ -387,14 +394,12 @@ server.tool(
       };
     }
 
-    // Use stats endpoint scoped to a very wide range and filter by tid
-    // PonyMail doesn't have a dedicated thread endpoint, but we can fetch
-    // the root email which contains thread_struct, then fetch each child.
-    const root = await apiFetch("/api/email.lua", { id });
+    // Use the dedicated thread endpoint which returns the full tree + flat emails
+    const params = { id };
+    if (find_parent) params.find_parent = "true";
+    const data = await apiFetch(`/api/thread${API_SUFFIX}`, params);
 
-    // Defence-in-depth: if the returned email belongs to a restricted list
-    // (e.g. caller passed a mismatched list/domain), block anyway.
-    const { list: rList, domain: rDomain } = extractListDomain(root);
+    const { list: rList, domain: rDomain } = extractListDomain(data?.thread || {});
     const restrictedAfter = rList && rDomain ? restrictionFor(rList, rDomain) : null;
     if (restrictedAfter) {
       return {
@@ -402,23 +407,93 @@ server.tool(
         isError: true,
       };
     }
-    if (isPrivateBlocked(rList || list, rDomain || domain, root?.private)) {
+    if (isPrivateBlocked(rList || list, rDomain || domain, data?.thread?.private)) {
       return {
         content: [{ type: "text", text: privateError(rList || list, rDomain || domain) }],
         isError: true,
       };
     }
 
+    const thread = data?.thread || {};
+    const emails = data?.emails || [];
+
     const lines = [];
-    lines.push(`# Thread: ${root.subject || "(no subject)"}`);
-    lines.push(`Root From: ${root.from} | Date: ${root.date}`);
-    lines.push(`List: ${root.list || root.list_raw}`);
+    lines.push(`# Thread: ${thread.subject || "(no subject)"}`);
+    lines.push(`Root From: ${thread.from || "(unknown)"} | Date: ${thread.date || new Date((thread.epoch || 0) * 1000).toISOString().slice(0, 10)}`);
+    lines.push(`List: ${thread.list || thread.list_raw || "(unknown)"}`);
+    lines.push(`Messages in thread: ${emails.length}`);
     lines.push("");
-    lines.push("## Root Message");
-    lines.push(truncate(root.body, 4000));
+
+    // Render flat email list for easy consumption
+    lines.push("## Messages");
+    for (const e of emails) {
+      const date = e.date || new Date((e.epoch || 0) * 1000).toISOString().slice(0, 10);
+      const indent = e.id === thread.id ? "" : "  "; // indent replies
+      lines.push(`${indent}### ${e.subject || "(no subject)"}`);
+      lines.push(`${indent}From: ${e.from || "(unknown)"} | Date: ${date} | ID: ${e.id || e.mid || "(no id)"}`);
+      if (e["in-reply-to"]) lines.push(`${indent}In-Reply-To: ${e["in-reply-to"]}`);
+      lines.push(`${indent}${truncate(e.body || e.body_short || "(no body)", 2000)}`);
+      lines.push("");
+    }
+
+    // If no emails were returned (maybe API gave just the tree), show root body
+    if (emails.length === 0 && thread.body) {
+      lines.push("## Root Message");
+      lines.push(truncate(thread.body, 4000));
+    }
 
     return {
       content: [{ type: "text", text: lines.join("\n") }],
+    };
+  }
+);
+
+// --- Tool: get_source -------------------------------------------------------
+server.tool(
+  "get_source",
+  "Fetch the raw RFC 2822 source of an email (original headers + body). " +
+    "Useful for debugging email parsing issues, verifying headers, or " +
+    "extracting information not available in the parsed view.",
+  {
+    id: z.string().describe("The email ID (mid/permalink) or Message-ID header value"),
+  },
+  { readOnlyHint: true },
+  async ({ id }) => {
+    // First fetch the email metadata to check restrictions
+    const email = await apiFetch(`/api/email${API_SUFFIX}`, { id });
+
+    const { list, domain } = extractListDomain(email);
+    const restricted = list && domain ? restrictionFor(list, domain) : null;
+    if (restricted) {
+      return {
+        content: [{ type: "text", text: restrictionError(list, domain, restricted) }],
+        isError: true,
+      };
+    }
+    if (isPrivateBlocked(list, domain, email?.private)) {
+      return {
+        content: [{ type: "text", text: privateError(list, domain) }],
+        isError: true,
+      };
+    }
+
+    // Fetch the raw source
+    const url = new URL(`/api/source${API_SUFFIX}`, BASE_URL);
+    url.searchParams.set("id", id);
+    const headers = { Accept: "text/plain" };
+    const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
+    const sessionCookie = envCookie || loadSession();
+    if (sessionCookie) headers.Cookie = sessionCookie;
+
+    const resp = await fetch(url.toString(), { headers });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`PonyMail API error ${resp.status}: ${body}`);
+    }
+    const source = await resp.text();
+
+    return {
+      content: [{ type: "text", text: truncate(source, 12000) }],
     };
   }
 );
@@ -453,7 +528,7 @@ server.tool(
     // marks this list as private. Skipped when the list is allow-listed.
     if (lp && dp && !allowedFor(lp, dp)) {
       try {
-        const meta = await apiFetch("/api/stats.lua", { list: lp, domain: dp, quick: "1" });
+        const meta = await apiFetch(`/api/stats${API_SUFFIX}`, { list: lp, domain: dp, quick: "1" });
         if (isPrivateBlocked(lp, dp, meta?.private)) {
           return {
             content: [{ type: "text", text: privateError(lp, dp) }],
@@ -474,7 +549,7 @@ server.tool(
       header_subject: subject,
     };
 
-    const data = await apiFetch("/api/mbox.lua", params);
+    const data = await apiFetch(`/api/mbox${API_SUFFIX}`, params);
     const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
 
     return {
@@ -575,7 +650,7 @@ server.tool(
 
     // Validate the cookie
     try {
-      const url = new URL("/api/preferences.lua", BASE_URL);
+      const url = new URL(`/api/preferences${API_SUFFIX}`, BASE_URL);
       const resp = await fetch(url.toString(), {
         headers: { Accept: "application/json", Cookie: sessionCookie },
       });
