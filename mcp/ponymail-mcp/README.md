@@ -9,7 +9,8 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | `list_lists` | Get an overview of all available mailing lists and message counts |
 | `search_list` | Search/browse a mailing list with filters (date, sender, subject, body, query) |
 | `get_email` | Fetch a specific email by ID with full body and attachments |
-| `get_thread` | Fetch the root message of a thread by thread ID |
+| `get_thread` | Fetch a complete email thread (full tree + flat message list). Supports `find_parent` to navigate to thread root from any reply. |
+| `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
 | `get_mbox` | Download mbox-formatted archive data for bulk export |
 | `login` | Authenticate via ASF OAuth to access private mailing lists |
 | `logout` | Clear cached session cookie |
@@ -37,6 +38,7 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
+| `PONYMAIL_API_SUFFIX` | `.lua` | API endpoint suffix. Use `.lua` (default) for `lists.apache.org` or `.json` for native Foal deployments. |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
 | `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |
@@ -223,4 +225,7 @@ Once connected, you can ask things like:
 - "Search the dev@iceberg.apache.org list for messages about partition spec in the last 30 days"
 - "Show me the available mailing lists"
 - "Fetch email with ID xyz..."
+- "Get the full thread for this email, navigating to the root"
+- "Show me the raw source of that email"
+- "What restrictions are currently active?"
 - "Get the mbox archive for dev@httpd.apache.org for 2024-03"
