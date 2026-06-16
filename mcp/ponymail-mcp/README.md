@@ -38,7 +38,7 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
-| `PONYMAIL_API_SUFFIX` | `.lua` | API endpoint suffix. Use `.lua` (default) for `lists.apache.org` or `.json` for native Foal deployments. |
+| `PONYMAIL_API_SUFFIX` | `.json` | API endpoint suffix and method selector. `.json` (default) = POST with JSON body (native Foal). `.lua` = GET with query params (legacy compat for older deployments). |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
 | `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |

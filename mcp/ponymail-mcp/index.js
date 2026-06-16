@@ -34,9 +34,9 @@ import {
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
-// API endpoint suffix. The legacy compat layer uses ".lua" (default),
-// while native Foal deployments use ".json".
-const API_SUFFIX = process.env.PONYMAIL_API_SUFFIX || ".lua";
+// API endpoint suffix and method selector. ".json" (default) uses POST with
+// JSON body (native Foal). ".lua" uses GET with query params (legacy compat).
+const API_SUFFIX = process.env.PONYMAIL_API_SUFFIX || ".json";
 
 // Loud, opt-in security notice. When the user has enabled the auto-extract
 // path via PONYMAIL_AUTO_EXTRACT_COOKIE=1, remind them at every startup what
@@ -67,24 +67,37 @@ if (autoExtractEnabled()) {
 // ---------------------------------------------------------------------------
 
 async function apiFetch(path, params = {}) {
-  const url = new URL(path, BASE_URL);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") {
-      url.searchParams.set(k, String(v));
-    }
-  }
-
   // Build headers — include session cookie if available
   const headers = { Accept: "application/json" };
-
-  // Priority: env var > cached session file
   const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
   const sessionCookie = envCookie || loadSession();
   if (sessionCookie) {
     headers.Cookie = sessionCookie;
   }
 
-  const resp = await fetch(url.toString(), { headers });
+  let resp;
+
+  if (API_SUFFIX === ".json") {
+    // .json endpoints expect POST with JSON body
+    const url = new URL(path, BASE_URL);
+    headers["Content-Type"] = "application/json";
+    const body = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") {
+        body[k] = v;
+      }
+    }
+    resp = await fetch(url.toString(), { method: "POST", headers, body: JSON.stringify(body) });
+  } else {
+    // .lua endpoints use GET with query parameters
+    const url = new URL(path, BASE_URL);
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") {
+        url.searchParams.set(k, String(v));
+      }
+    }
+    resp = await fetch(url.toString(), { headers });
+  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -479,13 +492,24 @@ server.tool(
 
     // Fetch the raw source
     const url = new URL(`/api/source${API_SUFFIX}`, BASE_URL);
-    url.searchParams.set("id", id);
     const headers = { Accept: "text/plain" };
     const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
     const sessionCookie = envCookie || loadSession();
     if (sessionCookie) headers.Cookie = sessionCookie;
 
-    const resp = await fetch(url.toString(), { headers });
+    let resp;
+    if (API_SUFFIX === ".json") {
+      headers["Content-Type"] = "application/json";
+      resp = await fetch(url.toString(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ id }),
+      });
+    } else {
+      url.searchParams.set("id", id);
+      resp = await fetch(url.toString(), { headers });
+    }
+
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       throw new Error(`PonyMail API error ${resp.status}: ${body}`);
@@ -651,9 +675,18 @@ server.tool(
     // Validate the cookie
     try {
       const url = new URL(`/api/preferences${API_SUFFIX}`, BASE_URL);
-      const resp = await fetch(url.toString(), {
-        headers: { Accept: "application/json", Cookie: sessionCookie },
-      });
+      const headers = { Accept: "application/json", Cookie: sessionCookie };
+      let resp;
+      if (API_SUFFIX === ".json") {
+        headers["Content-Type"] = "application/json";
+        resp = await fetch(url.toString(), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({}),
+        });
+      } else {
+        resp = await fetch(url.toString(), { headers });
+      }
       const data = await resp.json();
 
       if (data.login && data.login.credentials) {
