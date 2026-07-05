@@ -47,8 +47,15 @@ import { extractPonymailCookie } from "./cookie-extract.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".ponymail-mcp");
 const SESSION_FILE = path.join(SESSION_DIR, "session.json");
+const TOKEN_FILE = path.join(SESSION_DIR, "token.json");
 const CALLBACK_PORT = 39817;
 const LOGIN_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+
+// PonyMail Foal mints long-term API tokens with this prefix (see the server's
+// plugins/token.py). The server only treats an `Authorization: Bearer <token>`
+// value as a token when it starts with this prefix; anything else falls through
+// to cookie/anonymous auth. We use it to recognise tokens locally too.
+export const TOKEN_PREFIX = "pmt_";
 
 // ---------------------------------------------------------------------------
 // Session persistence
@@ -149,6 +156,175 @@ export function clearSession() {
   } catch (err) {
     console.error("[auth] Failed to clear session:", err.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Long-term API token persistence
+// ---------------------------------------------------------------------------
+//
+// Tokens (Foal's `pmt_...` bearer tokens) are the programmatic-auth counterpart
+// to the session cookie. Unlike the cookie they do not expire on the ~20h
+// schedule, so there is no timestamp-based expiry check here — the server is the
+// source of truth for a token's validity (it enforces the token's own expiry).
+//
+// Precedence, highest first: PONYMAIL_API_TOKEN env var, then a token cached to
+// ~/.ponymail-mcp/token.json (e.g. one minted via the create_token tool).
+
+/**
+ * Return the configured API token (env var wins over the cached file), or null.
+ */
+export function loadToken() {
+  const envToken = (process.env.PONYMAIL_API_TOKEN || "").trim();
+  if (envToken) return envToken;
+  try {
+    if (!fs.existsSync(TOKEN_FILE)) return null;
+    const data = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
+    return data.token || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cache a freshly-minted token so subsequent requests use it automatically.
+ * `meta` carries non-secret descriptors (id, description, expires) for display.
+ */
+export function saveToken(token, meta = {}) {
+  fs.mkdirSync(SESSION_DIR, { recursive: true });
+  fs.writeFileSync(
+    TOKEN_FILE,
+    JSON.stringify({ token, ...meta, timestamp: Date.now() }, null, 2)
+  );
+  console.error(`[auth] API token saved to ${TOKEN_FILE}`);
+}
+
+/**
+ * Return the non-secret metadata stored alongside a cached token (id,
+ * description, expires), or null. Env-var tokens carry no metadata, so this
+ * only reflects a token minted/cached via the token.json file.
+ */
+export function loadTokenMeta() {
+  try {
+    if (!fs.existsSync(TOKEN_FILE)) return null;
+    const { token, timestamp, ...meta } = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
+    return Object.keys(meta).length ? meta : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      fs.unlinkSync(TOKEN_FILE);
+      console.error("[auth] API token cleared");
+    }
+  } catch (err) {
+    console.error("[auth] Failed to clear API token:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Credential resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the interactive cookie credential (env var wins over cached file).
+ * Returns { cookie, source } or null. Token management on the server requires
+ * an interactive session, so token-management tools authenticate with this.
+ */
+export function resolveCookie() {
+  const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
+  const cookie = envCookie || loadSession();
+  if (!cookie) return null;
+  return { cookie, source: envCookie ? "env" : "file" };
+}
+
+/**
+ * Resolve the credential to use for a normal API request and return the HTTP
+ * headers that carry it. A long-term API token is preferred over the cookie
+ * (it doesn't expire on the short cookie schedule); the cookie is the fallback.
+ *
+ * Returns { headers, kind: "token"|"cookie"|null, source }. `headers` is empty
+ * when no credential is configured — anonymous access still works for public
+ * lists.
+ */
+export function resolveAuthHeaders() {
+  const token = loadToken();
+  if (token) {
+    return {
+      headers: { Authorization: `Bearer ${token}` },
+      kind: "token",
+      source: process.env.PONYMAIL_API_TOKEN ? "env" : "file",
+    };
+  }
+  const cookie = resolveCookie();
+  if (cookie) {
+    return { headers: { Cookie: cookie.cookie }, kind: "cookie", source: cookie.source };
+  }
+  return { headers: {}, kind: null, source: null };
+}
+
+/**
+ * Turn a non-OK PonyMail API response into an actionable, credential-aware
+ * message. Authentication/authorization failures (401/403) get specific
+ * guidance:
+ *   * a scope-specific 403 (server message mentions "scope") names the fix —
+ *     mint a token that includes the required scope;
+ *   * a token rejection tells the caller to check/re-mint the token;
+ *   * a cookie rejection points back at `login`;
+ *   * an anonymous request is told to authenticate.
+ * The server returns these as JSON `{ "okay": false, "message": ... }`, but we
+ * tolerate a plain-text body too.
+ *
+ * @param {number} status HTTP status code
+ * @param {string} body   Raw response body
+ * @param {{kind: ("token"|"cookie"|null)}} [auth] The credential that was sent
+ */
+export function describeApiError(status, body, auth) {
+  let serverMsg = "";
+  try {
+    const j = JSON.parse(body);
+    if (j && typeof j.message === "string") serverMsg = j.message;
+  } catch {
+    // Non-JSON body (e.g. a plain-text error) — fall back to the raw text.
+    serverMsg = (body || "").trim();
+  }
+  const kind = auth && auth.kind; // "token" | "cookie" | null
+  // Trim trailing punctuation so we don't produce "token.. It may be…".
+  const cleanMsg = serverMsg.replace(/[.\s]+$/, "");
+  const suffix = cleanMsg ? `: ${cleanMsg}` : "";
+
+  if (status === 401 || status === 403) {
+    // Scope failures happen only with a token; the server's message mentions
+    // "scope". Give the exact remedy.
+    if (/scope/i.test(serverMsg) || /scope/i.test(body || "")) {
+      return (
+        `PonyMail denied this request — your API token lacks the required scope for this endpoint. ` +
+        `Mint a token that includes the needed scope with create_token ` +
+        `(read = browse/fetch/mbox, write = send mail, admin = management).`
+      );
+    }
+    if (kind === "token") {
+      return (
+        `PonyMail rejected the API token (HTTP ${status})${suffix}. ` +
+        `It may be invalid, expired, or revoked — run auth_status to check, then mint a fresh ` +
+        `one with create_token or fix the PONYMAIL_API_TOKEN value.`
+      );
+    }
+    if (kind === "cookie") {
+      return (
+        `PonyMail rejected the session (HTTP ${status})${suffix}. ` +
+        `The cookie may be invalid or expired — run login again to re-authenticate.`
+      );
+    }
+    return (
+      `PonyMail requires authentication for this request (HTTP ${status})${suffix}. ` +
+      `Authenticate with the login tool or set an API token (see create_token).`
+    );
+  }
+
+  return `PonyMail API error ${status}${suffix || `: ${body}`}`;
 }
 
 // ---------------------------------------------------------------------------

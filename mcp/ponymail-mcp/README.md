@@ -13,8 +13,11 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
 | `get_mbox` | Download mbox-formatted archive data for bulk export |
 | `login` | Authenticate via ASF OAuth to access private mailing lists |
-| `logout` | Clear cached session cookie |
+| `logout` | Clear cached credentials (session cookie and API token) |
 | `auth_status` | Check current authentication status |
+| `create_token` | Mint a long-term API token for programmatic access (requires an interactive `login` first) |
+| `list_tokens` | List your API tokens (metadata only) |
+| `revoke_token` | Revoke an API token by id |
 | `list_restrictions` | Show mailing list patterns blocked by server policy |
 
 ## Setup
@@ -40,6 +43,7 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
 | `PONYMAIL_API_SUFFIX` | `.json` | API endpoint suffix and method selector. `.json` (default) = POST with JSON body (native Foal). `.lua` = GET with query params (legacy compat for older deployments). |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
+| `PONYMAIL_API_TOKEN` | *(none)* | Long-term `pmt_…` API token sent as `Authorization: Bearer`. Preferred over the cookie; does not expire on the ~20h cookie schedule. |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
 | `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |
 
@@ -163,7 +167,80 @@ what is currently allow-listed.
 
 ## Authentication (Private Lists)
 
-Public lists work without authentication. For private/restricted lists:
+Public lists work without authentication. For private/restricted lists you can
+authenticate with **either** a session cookie **or** a long-term API token — both
+are optional and only needed for private lists. If a token is configured it is
+used in preference to the cookie.
+
+### Long-term API tokens (recommended for automation)
+
+PonyMail Foal supports personal API tokens (`pmt_…`) sent as an
+`Authorization: Bearer` header. Unlike the session cookie, a token does **not**
+expire on the ~20-hour cookie schedule, so it survives across sessions — ideal
+for scripts and long-running MCP setups. A token grants the same access as the
+account that created it. This requires a PonyMail server with API-token support
+enabled (`tokens.enabled`).
+
+Two ways to get one:
+
+- **Mint it from this MCP (`create_token`).** First `login` interactively (the
+  server only lets an interactive cookie session manage tokens — a token cannot
+  mint more tokens). Then call `create_token` with an optional `description`,
+  `scopes` (see below), and `lifetime_days` (`0` = never expires; omit for the
+  server default, typically 30 days). The raw secret is shown **once** and
+  cached to `~/.ponymail-mcp/token.json`, after which it is used automatically.
+  List and revoke with `list_tokens` / `revoke_token`.
+- **From the PonyMail web UI** (user menu → **API Tokens**), then hand it to the
+  MCP via the `PONYMAIL_API_TOKEN` env var:
+  ```
+  PONYMAIL_API_TOKEN="pmt_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ```
+  The env var wins over any cached token file.
+
+**Scopes.** A token's access is the *intersection* of the owner's account
+permissions and the scopes it was granted — a scope can only restrict access,
+never widen it. `create_token` accepts a `scopes` list (default `["read"]`):
+
+| Scope | Grants |
+|-------|--------|
+| `read` | Search/browse, fetch emails/threads/sources, download mbox, read preferences |
+| `write` | Send email (compose) |
+| `admin` | Administrative operations — hide/delete/edit (only effective for admin accounts) |
+
+This MCP only issues **read** requests, so a `read` token covers everything it
+does; grant `write`/`admin` only if the token will be handed to another client
+that sends or manages mail. A request made with a token that lacks the required
+scope gets a `403` from the server, which the MCP surfaces as a clear scope error.
+
+**A scope is a *wish*, not a stored grant — permissions are re-evaluated live.**
+The server does **not** freeze the owner's permissions into the token at
+creation time. On every request it recomputes the effective access as the
+intersection of the token's scope with the owner's **current** account
+permissions *at that moment*. The scope is therefore a ceiling ("I wish to be
+able to do X") that is only honoured while the account still holds those
+permissions. Consequences:
+
+- If the owner **loses** a permission (e.g. is removed from a private list or a
+  moderator/admin role), every existing token instantly loses that access on
+  the next request — no matter what scope it was minted with. There is nothing
+  to expire or evict: a token is not a cached snapshot of permissions.
+- If the owner **gains** a permission after the token was created, a token whose
+  scope already covers it starts working for the new resource automatically —
+  again, without re-issuing the token.
+- Revoking a token (`revoke_token`) is still the way to kill a *specific*
+  credential; changing what the *account* can do is handled entirely by the
+  live intersection above.
+
+**Enabling this is a per-instance, Infra-involved decision.** API-token support
+is **disabled by default** (`tokens.enabled`), so it is off unless a deployment
+opts in. Individual PonyMail instances (e.g. `mail.apache.org`) may choose not
+to enable it at all, or to enable it with constraints such as a maximum token
+lifetime — all of this is server-side configuration. Enabling it on an ASF
+instance therefore needs to be coordinated with Infra.
+
+Token management (`create_token` / `list_tokens` / `revoke_token`) always uses
+the interactive cookie session, never a token. `logout` forgets the locally
+cached token but does **not** revoke it server-side — use `revoke_token` for that.
 
 ### Option 1: `login` tool — paste from DevTools (Default, Recommended)
 
@@ -216,7 +293,9 @@ When this opt-in is active, the server prints a multi-line warning to stderr at 
 
 ---
 
-Sessions expire after ~20 hours. Use `auth_status` to check, `logout` to clear.
+Cookie sessions expire after ~20 hours; API tokens do not. Use `auth_status` to
+check which credential is active and whether it is valid, and `logout` to clear
+the locally cached cookie and token.
 
 ## Usage Examples
 

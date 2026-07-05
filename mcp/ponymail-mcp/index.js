@@ -20,7 +20,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadSession, performLogin, clearSession, autoExtractEnabled } from "./auth.js";
+import {
+  performLogin,
+  clearSession,
+  autoExtractEnabled,
+  loadToken,
+  loadTokenMeta,
+  saveToken,
+  clearToken,
+  resolveCookie,
+  resolveAuthHeaders,
+  describeApiError,
+} from "./auth.js";
 import {
   restrictionFor,
   restrictionForAddress,
@@ -67,13 +78,11 @@ if (autoExtractEnabled()) {
 // ---------------------------------------------------------------------------
 
 async function apiFetch(path, params = {}) {
-  // Build headers — include session cookie if available
-  const headers = { Accept: "application/json" };
-  const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-  const sessionCookie = envCookie || loadSession();
-  if (sessionCookie) {
-    headers.Cookie = sessionCookie;
-  }
+  // Attach whichever credential is configured: an API token (preferred) as a
+  // Bearer header, else the session cookie. Empty when unauthenticated —
+  // public lists still work.
+  const auth = resolveAuthHeaders();
+  const headers = { Accept: "application/json", ...auth.headers };
 
   let resp;
 
@@ -101,7 +110,7 @@ async function apiFetch(path, params = {}) {
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
-    throw new Error(`PonyMail API error ${resp.status}: ${body}`);
+    throw new Error(describeApiError(resp.status, body, auth));
   }
 
   const contentType = resp.headers.get("content-type") || "";
@@ -110,6 +119,65 @@ async function apiFetch(path, params = {}) {
   }
   // mbox endpoint returns text
   return await resp.text();
+}
+
+// Call the /api/token.json management endpoint. The server requires an
+// *interactive* (cookie) session for token management — it refuses to manage
+// tokens when authenticated with a token, so a leaked token can't mint more
+// tokens or cover its tracks. We therefore always send the cookie here, never
+// the Bearer token, and fail early with a clear message if no cookie is set.
+//
+// Create/revoke must be a JSON POST with `action` in the body (the endpoint
+// rejects `action` in the query string), so we POST JSON for every action.
+async function tokenRequest(action, extra = {}) {
+  const cookie = resolveCookie();
+  if (!cookie) {
+    throw new Error(
+      "Managing API tokens requires an interactive login. Run the `login` tool " +
+        "first (or set PONYMAIL_SESSION_COOKIE). Tokens themselves cannot manage tokens."
+    );
+  }
+  const url = new URL("/api/token.json", BASE_URL);
+  const resp = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: cookie.cookie,
+    },
+    body: JSON.stringify({ action, ...extra }),
+  });
+  const text = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { okay: false, message: text || `HTTP ${resp.status}` };
+  }
+  return { status: resp.status, data };
+}
+
+// Token scopes, mirroring the PonyMail Foal server (plugins/token.py). A
+// token's effective access is the intersection of the owner's account
+// permissions and its scopes, so a scope can only *restrict* access. Default is
+// least-privilege `read`. NOTE: this MCP only exposes read-only tools
+// (search/fetch/mbox), so a `read` token is all it needs for its own use;
+// `write`/`admin` are offered so you can mint tokens here for OTHER clients
+// (e.g. a script that calls compose or mgmt directly).
+const TOKEN_SCOPES = {
+  read: "Read the archives — search, fetch emails/threads/sources, download mbox, preferences",
+  write: "Send email (compose)",
+  admin: "Administrative operations — hide/delete/edit (only effective for admin accounts)",
+};
+
+// Render an absolute epoch (or 0 = never) as a short human string.
+function formatExpiry(expires) {
+  if (!expires) return "never";
+  const iso = new Date(expires * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const remaining = expires * 1000 - Date.now();
+  if (remaining <= 0) return `${iso} UTC (expired)`;
+  const days = Math.floor(remaining / (24 * 3600 * 1000));
+  return `${iso} UTC (${days}d left)`;
 }
 
 function truncate(text, max = 4000) {
@@ -616,7 +684,9 @@ server.tool(
               `${sourceLabel}\n` +
               "Session cached. You can now access private mailing lists. " +
               "Session expires after ~20 hours.\n" +
-              "Use `auth_status` to check, `logout` to clear.",
+              "Use `auth_status` to check, `logout` to clear.\n\n" +
+              "Tip: for automation that outlives the ~20h cookie, run `create_token` " +
+              "now to mint a long-term API token (optional).",
           },
         ],
       };
@@ -636,14 +706,260 @@ server.tool(
 // --- Tool: logout -----------------------------------------------------------
 server.tool(
   "logout",
-  "Clear the cached PonyMail session cookie. After logout, only public lists " +
-    "will be accessible.",
+  "Clear locally cached PonyMail credentials — the session cookie and any " +
+    "cached API token. This only forgets the local copies; it does NOT revoke " +
+    "the token on the server (use `revoke_token` for that), and it cannot clear " +
+    "credentials supplied via the PONYMAIL_SESSION_COOKIE or PONYMAIL_API_TOKEN " +
+    "environment variables.",
   {},
   async () => {
     clearSession();
+    const hadCachedToken = !process.env.PONYMAIL_API_TOKEN && !!loadToken();
+    clearToken();
+
+    const notes = ["Cleared cached session cookie and API token."];
+    if (process.env.PONYMAIL_API_TOKEN) {
+      notes.push(
+        "⚠️ PONYMAIL_API_TOKEN is still set in the environment — that token will " +
+          "keep being used until you unset it in your MCP server config."
+      );
+    }
+    if (process.env.PONYMAIL_SESSION_COOKIE) {
+      notes.push(
+        "⚠️ PONYMAIL_SESSION_COOKIE is still set in the environment and will keep being used."
+      );
+    }
+    if (hadCachedToken) {
+      notes.push(
+        "Note: the cached token was only forgotten locally, not revoked server-side. " +
+          "Use `revoke_token` to invalidate it on the server."
+      );
+    }
+    return { content: [{ type: "text", text: notes.join("\n\n") }] };
+  }
+);
+
+// --- Tool: create_token -----------------------------------------------------
+server.tool(
+  "create_token",
+  "Create a long-term API token for programmatic access (optional — the cookie " +
+    "`login` flow still works without it). Tokens authenticate via an " +
+    "`Authorization: Bearer` header and, unlike the session cookie, do not expire " +
+    "on the ~20h schedule, so they survive across sessions.\n\n" +
+    "Requires an interactive cookie session first (run `login`), because the " +
+    "server forbids minting tokens while authenticated with a token. The raw " +
+    "token secret is shown ONCE here and never again; it is also cached locally " +
+    "so subsequent requests use it automatically.\n\n" +
+    "Scopes restrict what the token may do (they can only narrow access, never " +
+    "widen it beyond the account). This MCP only makes read requests, so a " +
+    "`read` token covers everything it does; grant `write`/`admin` only if the " +
+    "token will be used by other clients that send or manage mail.",
+  {
+    description: z
+      .string()
+      .optional()
+      .describe("Human-readable label for the token, e.g. 'research laptop'"),
+    scopes: z
+      .array(z.enum(["read", "write", "admin"]))
+      .optional()
+      .describe(
+        "Scopes to grant. Defaults to ['read'] (least privilege, sufficient for " +
+          "this MCP). read = search/fetch/mbox/preferences; write = send email " +
+          "(compose); admin = hide/delete/edit (mgmt, admin accounts only)."
+      ),
+    lifetime_days: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "Days until the token expires. 0 = never expires. Omit to use the server " +
+          "default (typically 30 days). The server clamps this to its configured maximum."
+      ),
+  },
+  async ({ description, scopes, lifetime_days }) => {
+    let res;
+    try {
+      const extra = {};
+      if (description) extra.description = description;
+      // De-dupe while preserving the caller's intent; the server re-validates,
+      // drops unknowns, and falls back to 'read' if nothing valid remains.
+      if (scopes && scopes.length) extra.scopes = [...new Set(scopes)].join(" ");
+      // Server expects `lifetime` in seconds; 0 means "never".
+      if (lifetime_days !== undefined) extra.lifetime = lifetime_days * 86400;
+      res = await tokenRequest("create", extra);
+    } catch (err) {
+      return { content: [{ type: "text", text: `❌ ${err.message}` }], isError: true };
+    }
+
+    if (!res.data.okay || !res.data.token) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ Could not create token: ${res.data.message || `HTTP ${res.status}`}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // The server echoes the scopes it actually granted (after validation);
+    // older servers without scoping omit the field — treat that as full access.
+    const grantedScopes = res.data.scopes || null;
+
+    // Cache the secret so future API calls use it. Only non-secret metadata is
+    // kept alongside for display; the raw token is written to the local file.
+    saveToken(res.data.token, {
+      id: res.data.id,
+      description: res.data.description,
+      expires: res.data.expires,
+      scopes: grantedScopes,
+    });
+
+    // Warn if the token can't do what this MCP does — i.e. it lacks `read`.
+    const scopeNote =
+      grantedScopes && !grantedScopes.includes("read")
+        ? "\n\n⚠️ This token has no `read` scope, so this MCP's own tools (search/fetch/" +
+          "mbox) will get 403s with it. It's only useful for the scopes it does carry."
+        : "";
+
     return {
       content: [
-        { type: "text", text: "Session cleared. Only public lists are accessible now." },
+        {
+          type: "text",
+          text:
+            `✅ Token created and cached locally — it will now be used for API requests.\n\n` +
+            `Token (shown ONCE — store it somewhere safe):\n\n    ${res.data.token}\n\n` +
+            `ID:          ${res.data.id}\n` +
+            `Description: ${res.data.description}\n` +
+            `Scopes:      ${grantedScopes ? grantedScopes.join(", ") : "(all — server has no scoping)"}\n` +
+            `Expires:     ${formatExpiry(res.data.expires)}` +
+            scopeNote +
+            `\n\n` +
+            `To use it from other tools/scripts, send header:\n` +
+            `    Authorization: Bearer ${res.data.token}\n` +
+            `or set PONYMAIL_API_TOKEN in this MCP server's env to persist it across reinstalls.`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Tool: list_tokens ------------------------------------------------------
+server.tool(
+  "list_tokens",
+  "List the API tokens for your account (metadata only — raw secrets are never " +
+    "shown after creation). Requires an interactive cookie session (`login`).",
+  {},
+  { readOnlyHint: true },
+  async () => {
+    let res;
+    try {
+      res = await tokenRequest("list");
+    } catch (err) {
+      return { content: [{ type: "text", text: `❌ ${err.message}` }], isError: true };
+    }
+
+    if (!res.data.okay) {
+      return {
+        content: [
+          { type: "text", text: `❌ Could not list tokens: ${res.data.message || `HTTP ${res.status}`}` },
+        ],
+        isError: true,
+      };
+    }
+
+    const tokens = res.data.tokens || [];
+    if (tokens.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No API tokens. Use `create_token` to mint one.",
+          },
+        ],
+      };
+    }
+
+    // Mark which listed token matches the one cached locally (if any), so the
+    // user can tell which token this MCP server is actively using.
+    const cachedMeta = process.env.PONYMAIL_API_TOKEN ? null : loadTokenMeta();
+    const cachedId = cachedMeta && cachedMeta.id;
+
+    const lines = ["## API tokens", ""];
+    for (const t of tokens) {
+      const created = t.created ? new Date(t.created * 1000).toISOString().slice(0, 10) : "?";
+      const lastUsed = t.last_used
+        ? new Date(t.last_used * 1000).toISOString().slice(0, 10)
+        : "never";
+      const active = cachedId && cachedId === t.id ? " ← cached locally (in use)" : "";
+      // Legacy tokens minted before scoping carry no `scopes` field; the server
+      // treats those as full access, so label them accordingly.
+      const scopes = t.scopes ? t.scopes.join(", ") : "all (unscoped)";
+      lines.push(`- **${t.description || "(no description)"}**${active}`);
+      lines.push(
+        `  id: ${t.id} | scopes: ${scopes} | created: ${created} | expires: ${formatExpiry(t.expires)} | last used: ${lastUsed}`
+      );
+    }
+    lines.push("");
+    if (process.env.PONYMAIL_API_TOKEN) {
+      lines.push("Note: a token is set via PONYMAIL_API_TOKEN; it may or may not be one of the above.");
+    }
+    lines.push("Scopes: " + Object.entries(TOKEN_SCOPES).map(([s, d]) => `${s} (${d})`).join("; ") + ".");
+    lines.push("Revoke one with `revoke_token` and its id.");
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// --- Tool: revoke_token -----------------------------------------------------
+server.tool(
+  "revoke_token",
+  "Revoke (permanently delete) an API token by its id, invalidating it on the " +
+    "server. Requires an interactive cookie session (`login`). If the revoked " +
+    "token matches the one cached locally, the local cache is cleared too.",
+  {
+    id: z.string().describe("The token id to revoke (from `list_tokens` or `create_token`)"),
+  },
+  async ({ id }) => {
+    let res;
+    try {
+      res = await tokenRequest("revoke", { id });
+    } catch (err) {
+      return { content: [{ type: "text", text: `❌ ${err.message}` }], isError: true };
+    }
+
+    if (!res.data.okay) {
+      return {
+        content: [
+          { type: "text", text: `❌ Could not revoke token: ${res.data.message || `HTTP ${res.status}`}` },
+        ],
+        isError: true,
+      };
+    }
+
+    // If the revoked token is the one we cached locally, drop the cache so we
+    // don't keep sending a now-dead token. The cached file records the id.
+    let clearedLocal = false;
+    try {
+      const meta = process.env.PONYMAIL_API_TOKEN ? null : loadTokenMeta();
+      if (meta && meta.id === id) {
+        clearToken();
+        clearedLocal = true;
+      }
+    } catch {
+      // Non-fatal — revocation on the server already succeeded.
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `✅ Token ${id} revoked on the server.` +
+            (clearedLocal ? "\nThe locally cached copy was also cleared." : ""),
+        },
       ],
     };
   }
@@ -652,30 +968,46 @@ server.tool(
 // --- Tool: auth_status ------------------------------------------------------
 server.tool(
   "auth_status",
-  "Check current authentication status. Shows whether a session cookie is " +
-    "cached and if it's still valid.",
+  "Check current authentication status. Shows whether an API token or session " +
+    "cookie is configured, which one will be used, and whether it is still valid.",
   {},
   { readOnlyHint: true },
   async () => {
-    const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-    const sessionCookie = envCookie || loadSession();
+    const auth = resolveAuthHeaders();
 
-    if (!sessionCookie) {
+    if (auth.kind === null) {
       return {
         content: [
           {
             type: "text",
-            text: "❌ Not authenticated. No session cookie found.\n\n" +
-              "Use `login` to authenticate, or set PONYMAIL_SESSION_COOKIE env var.",
+            text:
+              "❌ Not authenticated. No API token or session cookie found.\n\n" +
+              "Use `login` (cookie) or set an API token via PONYMAIL_API_TOKEN / the " +
+              "`create_token` tool. Public lists work without authentication.",
           },
         ],
       };
     }
 
-    // Validate the cookie
+    const kindLabel = auth.kind === "token" ? "API token (Bearer)" : "session cookie";
+    const sourceLabel =
+      auth.source === "env"
+        ? "environment variable"
+        : auth.source === "file"
+          ? "cached file"
+          : auth.source;
+
+    // If the active credential is a locally-cached token, we know its scopes
+    // (env-var tokens carry no metadata, and preferences.lua doesn't echo them).
+    const cachedMeta = auth.kind === "token" && auth.source === "file" ? loadTokenMeta() : null;
+    const scopeLine =
+      cachedMeta && cachedMeta.scopes ? `Scopes: ${cachedMeta.scopes.join(", ")}\n` : "";
+
+    // Validate the active credential against preferences.lua — the server
+    // resolves both Bearer tokens and cookies there and echoes the account.
     try {
       const url = new URL(`/api/preferences${API_SUFFIX}`, BASE_URL);
-      const headers = { Accept: "application/json", Cookie: sessionCookie };
+      const headers = { Accept: "application/json", ...auth.headers };
       let resp;
       if (API_SUFFIX === ".json") {
         headers["Content-Type"] = "application/json";
@@ -687,38 +1019,68 @@ server.tool(
       } else {
         resp = await fetch(url.toString(), { headers });
       }
-      const data = await resp.json();
+      const body = await resp.text();
+      let data = {};
+      try {
+        data = JSON.parse(body);
+      } catch {
+        // leave data empty; handled below
+      }
 
-      if (data.login && data.login.credentials) {
+      if (resp.ok && data.login && data.login.credentials) {
         const creds = data.login.credentials;
         return {
           content: [
             {
               type: "text",
-              text: `✅ Authenticated as: ${creds.fullname || "Unknown"} (${creds.email || "N/A"})\n\n` +
-                `Source: ${envCookie ? "environment variable" : "cached session file"}\n` +
-                "Session is valid.",
-            },
-          ],
-        };
-      } else {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "⚠️ Session cookie found but no login credentials returned.\n" +
-                "The session may have expired. Use `login` to re-authenticate.",
+              text:
+                `✅ Authenticated as: ${creds.fullname || "Unknown"} (${creds.email || "N/A"})\n\n` +
+                `Method: ${kindLabel}\n` +
+                `Source: ${sourceLabel}\n` +
+                scopeLine +
+                (auth.kind === "token"
+                  ? "Token is valid. Tokens do not expire on the ~20h cookie schedule."
+                  : "Session is valid."),
             },
           ],
         };
       }
+
+      // A 401/403 means the credential reached the server and was rejected —
+      // distinguish a scope limitation (token is valid, just can't read
+      // preferences) from an outright invalid/expired credential.
+      if (resp.status === 401 || resp.status === 403) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `⚠️ ${describeApiError(resp.status, body, auth)}`,
+            },
+          ],
+        };
+      }
+
+      // 200 (or other) but no credentials: the server treated us as anonymous,
+      // which for a supplied credential means it was not accepted.
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `⚠️ ${kindLabel} found (source: ${sourceLabel}) but the server returned no login ` +
+              `credentials — it treated the request as anonymous.\n` +
+              (auth.kind === "token"
+                ? "The token is likely invalid, revoked, or expired. Mint a new one with `create_token`, or fix PONYMAIL_API_TOKEN."
+                : "The session is likely invalid or expired. Use `login` to re-authenticate."),
+          },
+        ],
+      };
     } catch (err) {
       return {
         content: [
           {
             type: "text",
-            text: `⚠️ Could not validate session: ${err.message}\n` +
-              "Use `login` to re-authenticate.",
+            text: `⚠️ Could not validate ${kindLabel}: ${err.message}`,
           },
         ],
       };

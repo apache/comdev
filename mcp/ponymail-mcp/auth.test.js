@@ -52,8 +52,11 @@ function runInChild(home, snippet, extraEnv = {}) {
     process.stdout.write(JSON.stringify(out));
   `;
   const baseEnv = { ...process.env, HOME: home, USERPROFILE: home };
-  // Always strip the opt-in so individual tests can re-set it explicitly.
+  // Always strip the opt-in and credential env vars so individual tests can
+  // re-set them explicitly and aren't perturbed by the dev's own shell.
   delete baseEnv.PONYMAIL_AUTO_EXTRACT_COOKIE;
+  delete baseEnv.PONYMAIL_API_TOKEN;
+  delete baseEnv.PONYMAIL_SESSION_COOKIE;
   const res = spawnSync("node", ["--input-type=module", "-e", code], {
     env: { ...baseEnv, ...extraEnv },
     encoding: "utf8",
@@ -68,6 +71,12 @@ function writeSessionFile(home, payload) {
   const dir = path.join(home, ".ponymail-mcp");
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "session.json"), JSON.stringify(payload));
+}
+
+function writeTokenFile(home, payload) {
+  const dir = path.join(home, ".ponymail-mcp");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "token.json"), JSON.stringify(payload));
 }
 
 test("loadSession returns null when no session file exists", () => {
@@ -257,4 +266,213 @@ test("extractPonymailFromPaste rejects a malformed bare value (not a UUID)", () 
   // We only accept bare UUIDs without the prefix; arbitrary strings shouldn't
   // be silently wrapped in "ponymail=".
   assert.equal(extract("not-a-uuid-shaped-string"), null);
+});
+
+// ---------------------------------------------------------------------------
+// Long-term API token persistence
+// ---------------------------------------------------------------------------
+
+test("loadToken returns null when neither env var nor file is set", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, `return a.loadToken();`);
+    assert.equal(out, null);
+  });
+});
+
+test("loadToken returns the env var when PONYMAIL_API_TOKEN is set", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, `return a.loadToken();`, {
+      PONYMAIL_API_TOKEN: "pmt_envtoken",
+    });
+    assert.equal(out, "pmt_envtoken");
+  });
+});
+
+test("loadToken reads the cached token.json file when no env var is set", () => {
+  withTempHome((home) => {
+    writeTokenFile(home, { token: "pmt_filetoken", id: "abc", timestamp: Date.now() });
+    const out = runInChild(home, `return a.loadToken();`);
+    assert.equal(out, "pmt_filetoken");
+  });
+});
+
+test("loadToken: env var wins over the cached file", () => {
+  withTempHome((home) => {
+    writeTokenFile(home, { token: "pmt_filetoken" });
+    const out = runInChild(home, `return a.loadToken();`, {
+      PONYMAIL_API_TOKEN: "pmt_envtoken",
+    });
+    assert.equal(out, "pmt_envtoken");
+  });
+});
+
+test("loadToken returns null for a malformed token file", () => {
+  withTempHome((home) => {
+    const dir = path.join(home, ".ponymail-mcp");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "token.json"), "{ not json");
+    const out = runInChild(home, `return a.loadToken();`);
+    assert.equal(out, null);
+  });
+});
+
+test("saveToken then loadToken round-trips the secret", () => {
+  withTempHome((home) => {
+    const out = runInChild(
+      home,
+      `a.saveToken("pmt_new", { id: "id1", description: "desc" }); return a.loadToken();`
+    );
+    assert.equal(out, "pmt_new");
+  });
+});
+
+test("loadTokenMeta returns the non-secret metadata but not the token", () => {
+  withTempHome((home) => {
+    writeTokenFile(home, {
+      token: "pmt_secret",
+      id: "id1",
+      description: "laptop",
+      expires: 123,
+      timestamp: Date.now(),
+    });
+    const out = runInChild(home, `return a.loadTokenMeta();`);
+    assert.deepEqual(out, { id: "id1", description: "laptop", expires: 123 });
+    assert.equal(out.token, undefined);
+  });
+});
+
+test("loadTokenMeta returns null when there is no metadata beyond the token", () => {
+  withTempHome((home) => {
+    writeTokenFile(home, { token: "pmt_secret", timestamp: Date.now() });
+    const out = runInChild(home, `return a.loadTokenMeta();`);
+    assert.equal(out, null);
+  });
+});
+
+test("clearToken removes the token file", () => {
+  withTempHome((home) => {
+    writeTokenFile(home, { token: "pmt_x" });
+    const tokenFile = path.join(home, ".ponymail-mcp", "token.json");
+    assert.equal(existsSync(tokenFile), true, "precondition: file exists");
+    runInChild(home, `a.clearToken(); return null;`);
+    assert.equal(existsSync(tokenFile), false, "token file should be deleted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Credential resolution (token preferred over cookie)
+// ---------------------------------------------------------------------------
+
+test("resolveAuthHeaders returns no credential when nothing is configured", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, `return a.resolveAuthHeaders();`);
+    assert.equal(out.kind, null);
+    assert.deepEqual(out.headers, {});
+  });
+});
+
+test("resolveAuthHeaders uses a Bearer token when one is configured", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, `return a.resolveAuthHeaders();`, {
+      PONYMAIL_API_TOKEN: "pmt_abc",
+    });
+    assert.equal(out.kind, "token");
+    assert.equal(out.source, "env");
+    assert.deepEqual(out.headers, { Authorization: "Bearer pmt_abc" });
+  });
+});
+
+test("resolveAuthHeaders falls back to the cookie when no token is set", () => {
+  withTempHome((home) => {
+    writeSessionFile(home, { cookie: "ponymail=abc", timestamp: Date.now() });
+    const out = runInChild(home, `return a.resolveAuthHeaders();`);
+    assert.equal(out.kind, "cookie");
+    assert.deepEqual(out.headers, { Cookie: "ponymail=abc" });
+  });
+});
+
+test("resolveAuthHeaders prefers the token over an available cookie", () => {
+  withTempHome((home) => {
+    writeSessionFile(home, { cookie: "ponymail=abc", timestamp: Date.now() });
+    const out = runInChild(home, `return a.resolveAuthHeaders();`, {
+      PONYMAIL_API_TOKEN: "pmt_abc",
+    });
+    assert.equal(out.kind, "token");
+    assert.deepEqual(out.headers, { Authorization: "Bearer pmt_abc" });
+  });
+});
+
+test("resolveCookie returns null when no cookie is available, ignoring any token", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, `return a.resolveCookie();`, {
+      PONYMAIL_API_TOKEN: "pmt_abc",
+    });
+    assert.equal(out, null);
+  });
+});
+
+test("resolveCookie: env cookie wins over the cached session file", () => {
+  withTempHome((home) => {
+    writeSessionFile(home, { cookie: "ponymail=fromfile", timestamp: Date.now() });
+    const out = runInChild(home, `return a.resolveCookie();`, {
+      PONYMAIL_SESSION_COOKIE: "ponymail=fromenv",
+    });
+    assert.deepEqual(out, { cookie: "ponymail=fromenv", source: "env" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// API error / auth-failure messaging (describeApiError)
+// ---------------------------------------------------------------------------
+
+function describe(status, body, auth) {
+  return withTempHome((home) =>
+    runInChild(
+      home,
+      `return a.describeApiError(${JSON.stringify(status)}, ${JSON.stringify(body)}, ${JSON.stringify(auth)});`
+    )
+  );
+}
+
+test("describeApiError: scope failure names the fix regardless of credential kind", () => {
+  const body = JSON.stringify({ okay: false, message: "This API token lacks the required scope for this endpoint." });
+  const out = describe(403, body, { kind: "token" });
+  assert.match(out, /lacks the required scope/i);
+  assert.match(out, /create_token/);
+  // The server's own message is echoed in.
+  assert.match(out, /required scope for this endpoint/i);
+});
+
+test("describeApiError: 401/403 with a token blames the token and points at auth_status", () => {
+  const out = describe(401, JSON.stringify({ okay: false, message: "Unauthorized" }), { kind: "token" });
+  assert.match(out, /rejected the API token/i);
+  assert.match(out, /invalid, expired, or revoked/i);
+  assert.match(out, /PONYMAIL_API_TOKEN/);
+});
+
+test("describeApiError: 401/403 with a cookie points back at login", () => {
+  const out = describe(403, "", { kind: "cookie" });
+  assert.match(out, /rejected the session/i);
+  assert.match(out, /login again/i);
+});
+
+test("describeApiError: 401/403 with no credential asks the caller to authenticate", () => {
+  const out = describe(401, "", { kind: null });
+  assert.match(out, /requires authentication/i);
+  assert.match(out, /login tool or set an API token/i);
+});
+
+test("describeApiError: a scope hint in a plain-text (non-JSON) body is still detected", () => {
+  const out = describe(403, "token scope insufficient", { kind: "token" });
+  assert.match(out, /lacks the required scope/i);
+});
+
+test("describeApiError: non-auth status falls through to a generic message", () => {
+  const out = describe(500, JSON.stringify({ okay: false, message: "boom" }), { kind: "token" });
+  assert.match(out, /^PonyMail API error 500: boom/);
+});
+
+test("describeApiError: non-auth status with a plain body keeps the raw text", () => {
+  const out = describe(404, "Not found", { kind: null });
+  assert.match(out, /PonyMail API error 404: Not found/);
 });
