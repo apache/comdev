@@ -591,14 +591,28 @@ export function loginPage(baseUrl) {
 
 function resultPage(success, message) {
   const icon = success ? "✅" : "❌";
-  const color = success ? "#1b5e20" : "#b71c1c";
-  const bg = success ? "#e8f5e9" : "#ffebee";
-  const autoClose = success
-    ? `<script>setTimeout(() => { document.title = "Done"; try { window.close(); } catch (e) {} }, 2000);</script>`
-    : "";
+  const lightColor = success ? "#1b5e20" : "#b71c1c";
+  const lightBg = success ? "#e8f5e9" : "#ffebee";
+  const darkColor = success ? "#a7e0b2" : "#ff9ea1";
+  const darkBg = success ? "#1f3a25" : "#3a1f22";
+  // window.close() only works for tabs opened by script; browsers block it for
+  // a tab the user navigated to. So we try, and if the tab is still here a
+  // moment later, reveal a manual-close hint instead of failing silently.
   const action = success
-    ? `<p style="margin-top:24px">You can close this tab — the MCP server is now authenticated.</p>
-       <button onclick="window.close()" style="margin-top:8px;padding:10px 22px;background:#0066cc;color:white;border:none;border-radius:6px;font-size:1em;cursor:pointer">Close tab</button>`
+    ? `<p style="margin-top:24px">You're authenticated — the MCP server can now access PonyMail.</p>
+       <button id="closeBtn" type="button">Close tab</button>
+       <p id="closeHint" style="display:none;margin-top:14px">This tab can't be closed automatically — press <code>Ctrl/Cmd + W</code> to close it.</p>
+       <script>
+         function tryClose() {
+           window.close();
+           setTimeout(function () {
+             document.getElementById('closeBtn').style.display = 'none';
+             document.getElementById('closeHint').style.display = 'block';
+           }, 150);
+         }
+         document.getElementById('closeBtn').addEventListener('click', tryClose);
+         setTimeout(function () { document.title = "Done"; tryClose(); }, 2000);
+       </script>`
     : `<p style="margin-top:24px"><a href="/" style="color:#0066cc;text-decoration:none;font-weight:500">← Try again</a></p>`;
   return `<!DOCTYPE html>
 <html>
@@ -606,15 +620,23 @@ function resultPage(success, message) {
   <title>PonyMail MCP — ${success ? "Authenticated" : "Authentication error"}</title>
   <meta charset="utf-8">
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light dark; --card-bg: ${lightBg}; --accent: ${lightColor}; --text: #222; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-      max-width: 640px; margin: 80px auto; padding: 0 20px; text-align: center; color: #222; }
-    .card { background: ${bg}; border-radius: 12px; padding: 28px 24px; }
-    h1 { margin: 0 0 4px 0; color: ${color}; font-size: 1.4em; }
+      max-width: 640px; margin: 80px auto; padding: 0 20px; text-align: center;
+      color: var(--text); }
+    .card { background: var(--card-bg); color: var(--text); border-radius: 12px; padding: 28px 24px; }
+    h1 { margin: 0 0 4px 0; color: var(--accent); font-size: 1.4em; }
     p { margin: 8px 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px; }
-    @media (prefers-color-scheme: dark) { body { color: #ddd; background: #1a1a1a; } }
+      background: rgba(0,0,0,0.12); padding: 1px 5px; border-radius: 3px; }
+    button { margin-top: 8px; padding: 10px 22px; background: #0066cc; color: white;
+      border: none; border-radius: 6px; font-size: 1em; cursor: pointer; }
+    button:hover { background: #0055aa; }
+    @media (prefers-color-scheme: dark) {
+      :root { --card-bg: ${darkBg}; --accent: ${darkColor}; --text: #ddd; }
+      body { background: #1a1a1a; }
+      code { background: rgba(255,255,255,0.14); }
+    }
   </style>
 </head>
 <body>
@@ -622,7 +644,6 @@ function resultPage(success, message) {
     <h1>${icon} ${message}</h1>
     ${action}
   </div>
-  ${autoClose}
 </body>
 </html>`;
 }
