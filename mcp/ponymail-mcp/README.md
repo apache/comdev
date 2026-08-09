@@ -7,7 +7,7 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | Tool | Description |
 |------|-------------|
 | `list_lists` | Get an overview of all available mailing lists and message counts |
-| `search_list` | Search/browse a mailing list with filters (date, sender, subject, body, query) |
+| `search_list` | Search/browse a mailing list with filters (date, sender, subject, body, query). Supports `mode: "threads"` to list one entry per thread (thread starters with reply counts and continuation hints). |
 | `get_email` | Fetch a specific email by ID with full body and attachments |
 | `get_thread` | Fetch a complete email thread (full tree + flat message list). Supports `find_parent` to navigate to thread root from any reply. |
 | `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
@@ -223,6 +223,10 @@ Sessions expire after ~20 hours. Use `auth_status` to check, `logout` to clear.
 Once connected, you can ask things like:
 
 - "Search the dev@iceberg.apache.org list for messages about partition spec in the last 30 days"
+- "List the discussion threads started on dev@community.apache.org last month"
+  (uses `mode: "threads"`, which overrides `quick`;
+  threading only spans the queried timespan,
+  so replies to older messages show up as thread starters marked as possible continuations)
 - "Show me the available mailing lists"
 - "Fetch email with ID xyz..."
 - "Get the full thread for this email, navigating to the root"

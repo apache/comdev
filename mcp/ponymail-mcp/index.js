@@ -17,6 +17,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -31,6 +32,7 @@ import {
   listAllowed,
   allowedFor,
 } from "./restrictions.js";
+import { Mail, extractListDomain, countDescendants } from "./mail.js";
 
 const BASE_URL = process.env.PONYMAIL_BASE_URL || "https://lists.apache.org";
 
@@ -117,32 +119,34 @@ function truncate(text, max = 4000) {
   return text.slice(0, max) + `\n... [truncated, ${text.length - max} more chars]`;
 }
 
-// Extract (list, domain) from a PonyMail email record. PonyMail returns
-// `list` as "list@domain" and `list_raw` as "<list.domain>". We try both.
-function extractListDomain(record) {
-  const candidates = [record?.list, record?.list_raw];
-  for (const c of candidates) {
-    if (!c || typeof c !== "string") continue;
-    const stripped = c.replace(/^<|>$/g, "");
-    if (stripped.includes("@")) {
-      const [list, domain] = stripped.split("@", 2);
-      if (list && domain) return { list, domain };
-    }
-    const dot = stripped.indexOf(".");
-    if (dot > 0) {
-      return { list: stripped.slice(0, dot), domain: stripped.slice(dot + 1) };
+// Render the "Showing X-Y of N" pagination footer shared by the
+// email and thread listings of search_list.
+function paginationLines(total, start, end, offset, noun) {
+  const lines = [];
+  if (total === 0) {
+    // no-op; the empty section header is enough signal
+  } else if (end <= start) {
+    lines.push(`Showing 0 of ${total} (offset ${offset} is past the end).`);
+  } else {
+    lines.push(`Showing ${start + 1}-${end} of ${total}.`);
+    if (end < total) {
+      lines.push(`... ${total - end} more ${noun}. Re-query with offset=${end} to continue.`);
     }
   }
-  return { list: null, domain: null };
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
+// Single source of truth for the server version.
+const require = createRequire(import.meta.url);
+const { version } = require("./package.json");
+
 const server = new McpServer({
   name: "ponymail",
-  version: "1.0.0",
+  version,
 });
 
 // --- Tool: list_lists -------------------------------------------------------
@@ -183,10 +187,11 @@ server.tool(
 // --- Tool: search_list ------------------------------------------------------
 server.tool(
   "search_list",
-  "Search or browse a mailing list. Returns email summaries, participant stats, " +
-    "and thread structure. Use the list prefix (e.g. 'dev') and domain " +
-    "(e.g. 'iceberg.apache.org'). Supports date ranges, search queries, and " +
-    "header filters.",
+  `Search or browse a mailing list.
+   Returns email summaries, participant stats, and thread structure.
+   Use the list prefix (e.g. 'dev') and domain (e.g. 'iceberg.apache.org').
+   Supports date ranges, search queries, and header filters.
+   Use mode: 'threads' to list one entry per thread instead of every email.`,
   {
     list: z.string().describe("List prefix, e.g. 'dev', 'user', 'general'. Use '*' for all lists in a domain."),
     domain: z.string().describe("List domain, e.g. 'iceberg.apache.org', 'httpd.apache.org'"),
@@ -202,7 +207,27 @@ server.tool(
     subject: z.string().optional().describe("Filter by Subject: header"),
     body: z.string().optional().describe("Filter by body text"),
     quick: z.boolean().optional().describe("If true, return statistics only (faster)"),
-    emails_only: z.boolean().optional().describe("If true, return email summaries only (skip thread_struct, participants, word cloud)"),
+    emails_only: z
+      .boolean()
+      .optional()
+      .describe(
+        `DEPRECATED, ignored.
+         Thread structure and word cloud computation are now skipped automatically
+         unless mode is 'threads'.`
+      ),
+    mode: z
+      .enum(["emails", "threads"])
+      .optional()
+      .describe(
+        `Output mode, default 'emails'.
+         'emails' lists every matching email.
+         'threads' lists one entry per thread (thread starters only):
+         each entry shows the root message's subject, sender, date, ID, and total reply count.
+         Entries whose subject starts with 'Re:' or whose root has an In-Reply-To header are annotated as possible continuations of an earlier thread
+         (threading only spans the queried timespan, so replies to older messages appear as thread starters).
+         'threads' overrides quick.
+         limit/offset paginate over the listed entries.`
+      ),
     limit: z
       .number()
       .int()
@@ -218,7 +243,8 @@ server.tool(
       .describe("Number of email summaries to skip before rendering (default 0). Combine with `limit` to page through a large result set without re-querying the backend."),
   },
   { readOnlyHint: true },
-  async ({ list, domain, query, timespan, from, subject, body, quick, emails_only, limit, offset }) => {
+  async ({ list, domain, query, timespan, from, subject, body, quick, mode, limit, offset }) => {
+    const threadsMode = mode === "threads";
     const pageLimit = limit ?? 30;
     const pageOffset = offset ?? 0;
     const restricted = restrictionFor(list, domain);
@@ -238,8 +264,14 @@ server.tool(
       header_subject: subject,
       header_body: body,
     };
-    if (quick) params.quick = "1";
-    if (emails_only) params.emailsOnly = "1";
+    if (threadsMode) {
+        // threads mode needs the full response
+    } else if (quick) {
+        params.quick = "1";
+    } else {
+        // threading information can be omitted
+        params.emailsOnly = "1";
+    }
 
     const data = await apiFetch(`/api/stats${API_SUFFIX}`, params);
 
@@ -275,7 +307,13 @@ server.tool(
     // Build a readable summary
     const lines = [];
     lines.push(`# ${data.list || list + "@" + domain}`);
-    lines.push(`Hits: ${data.hits ?? "N/A"} | Threads: ${data.no_threads ?? "N/A"}`);
+    // The thread count is only meaningful when thread_struct was computed;
+    // with emailsOnly the backend reports a bogus 0.
+    lines.push(
+      threadsMode
+        ? `Hits: ${data.hits ?? "N/A"} | Threads: ${data.no_threads ?? "N/A"}`
+        : `Hits: ${data.hits ?? "N/A"}`
+    );
     if (data.firstYear) lines.push(`Archive range: ${data.firstYear} – ${data.lastYear}`);
     lines.push("");
 
@@ -291,11 +329,35 @@ server.tool(
       lines.push("");
     }
 
-    // Emails — `quick` mode is stats-only: PonyMail's quick response carries
-    // email objects without subject/from/id (issue #9), so skip the section
-    // entirely. Use `emails_only` to get email summaries. Fields are also
-    // guarded below so a sparse entry never renders as "undefined".
-    if (!quick && data.emails) {
+    if (threadsMode) {
+      // Thread starters only: one entry per top-level thread_struct node.
+      // Node tid is the root message's mid,
+      // so join it against the email summaries for sender and date.
+      lines.push("## Threads");
+      const roots = Array.isArray(data.thread_struct) ? data.thread_struct : [];
+      const byMid = Mail.mapByMid(
+        Array.isArray(data.emails) ? data.emails : Object.values(data.emails || {})
+      );
+      const total = roots.length;
+      const start = Math.min(pageOffset, total);
+      const end = Math.min(start + pageLimit, total);
+      for (const node of roots.slice(start, end)) {
+        // Fall back to the node's own fields when the root email is missing
+        // from the summaries (defensive; should not happen in practice).
+        const mail = byMid.get(node.tid)
+          || new Mail({ subject: node.subject, epoch: node.epoch, mid: node.tid });
+        lines.push(mail.formatListItem({
+          replyCount: countDescendants(node),
+          continuationHint: true,
+        }));
+      }
+      lines.push("");
+      lines.push(...paginationLines(total, start, end, pageOffset, "threads"));
+    } else if (!quick && data.emails) {
+      // `quick` mode is stats-only:
+      // PonyMail's quick response carries email objects without subject/from/id (issue #9),
+      // so skip the section entirely.
+      // Fields are guarded in Mail so a sparse entry never renders as "undefined".
       lines.push("## Emails");
       const emails = Array.isArray(data.emails)
         ? data.emails
@@ -303,24 +365,11 @@ server.tool(
       const total = emails.length;
       const start = Math.min(pageOffset, total);
       const end = Math.min(start + pageLimit, total);
-      const windowed = emails.slice(start, end);
-      for (const e of windowed) {
-        const date = e.date || new Date((e.epoch || 0) * 1000).toISOString().slice(0, 10);
-        lines.push(`- **${e.subject || "(no subject)"}**`);
-        lines.push(`  From: ${e.from || "(unknown sender)"} | Date: ${date} | ID: ${e.id || e.mid || "(no id)"}`);
+      for (const e of emails.slice(start, end)) {
+        lines.push(new Mail(e).formatListItem());
       }
       lines.push("");
-      if (total === 0) {
-        // no-op; the empty "## Emails" header is enough signal
-      } else if (windowed.length === 0) {
-        lines.push(`Showing 0 of ${total} (offset ${pageOffset} is past the end).`);
-      } else {
-        lines.push(`Showing ${start + 1}-${end} of ${total}.`);
-        if (end < total) {
-          const nextOffset = end;
-          lines.push(`... ${total - end} more emails. Re-query with offset=${nextOffset} to continue.`);
-        }
-      }
+      lines.push(...paginationLines(total, start, end, pageOffset, "emails"));
     }
 
     return {
@@ -335,7 +384,7 @@ server.tool(
   "Fetch a specific email by its ID or Message-ID header. Returns full body, " +
     "headers, and attachment info.",
   {
-    id: z.string().describe("The email ID (mid) or Message-ID header value"),
+    id: z.string().describe("The email's mid (permalink) or its Message-ID header value"),
   },
   { readOnlyHint: true },
   async ({ id }) => {
@@ -392,7 +441,7 @@ server.tool(
     "all emails in the conversation. Optionally use find_parent to navigate up " +
     "to the thread root from any message in the thread.",
   {
-    id: z.string().describe("The email ID (mid/permalink) — the thread root or any message in the thread"),
+    id: z.string().describe("The email's mid (permalink) or its Message-ID, identifying the thread root or any message in the thread"),
     list: z.string().optional().describe("List prefix for restriction checks, e.g. 'dev', 'user'"),
     domain: z.string().optional().describe("List domain for restriction checks, e.g. 'iceberg.apache.org'"),
     find_parent: z.boolean().optional().describe("If true, navigate up to the thread root before fetching the full thread"),
@@ -468,7 +517,7 @@ server.tool(
     "Useful for debugging email parsing issues, verifying headers, or " +
     "extracting information not available in the parsed view.",
   {
-    id: z.string().describe("The email ID (mid/permalink) or Message-ID header value"),
+    id: z.string().describe("The email's mid (permalink) or its Message-ID header value"),
   },
   { readOnlyHint: true },
   async ({ id }) => {
