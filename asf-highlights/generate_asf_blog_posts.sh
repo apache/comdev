@@ -31,7 +31,7 @@
 # Designed to be run on the 1st of the month (or shortly after).
 
 ASF_HIGHLIGHTS_DIR="$HOME/devel/apache/comdev/comdev/asf-highlights"
-BLOG_DIR="$HOME/devel/apache/comdev-site/source/blog"
+BLOG_DIR="$HOME/devel/apache/comdev/comdev-site/source/blog"
 AUTHOR="Rich Bowen"
 
 set -euo pipefail
