@@ -1,0 +1,30 @@
+# tlp-governance-defaults.yaml
+#
+# Canonical governance defaults for Apache top-level projects (TLPs).
+# Maintained by the Apache Community Development (ComDev) committee.
+#
+# These values are consumed by Apache Magpie's committer-onboarding
+# skill. Individual projects may override any value in their own
+# project-level configuration.
+#
+# Source of truth: https://github.com/apache/comdev/blob/main/governance/tlp-governance-defaults.yaml
+# See also: https://community.apache.org/newcommitter.html
+
+stage: tlp
+governing_body: PMC
+
+whimsy_roster_url: "https://whimsy.apache.org/roster/committee/{project}"
+
+private_list: "private@{project}.apache.org"
+
+vote_rule: "More binding +1 votes than binding -1 votes (majority), minimum 3 days"
+binding_voters: "current PMC members"
+
+# Post-vote notifications
+notify_board: false          # TLPs do not notify the board on new committers
+notify_private_list: true    # Results announced on private@
+
+# Account setup
+account_request_url: "https://whimsy.apache.org/officers/acreq"
+icla_info_url: "https://www.apache.org/licenses/contributor-agreements.html"
+
