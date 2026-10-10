@@ -12,8 +12,8 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | `get_thread` | Fetch a complete email thread (full tree + flat message list). Supports `find_parent` to navigate to thread root from any reply. |
 | `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
 | `get_mbox` | Download mbox-formatted archive data for bulk export |
-| `login` | Authenticate via ASF OAuth to access private mailing lists |
-| `logout` | Clear cached session cookie |
+| `login` | Authenticate via ASF OAuth to access private mailing lists (`method`: `cookie` or `token`) |
+| `logout` | Clear the cached session cookie or token (a token is also revoked on the server) |
 | `auth_status` | Check current authentication status |
 | `list_restrictions` | Show mailing list patterns blocked by server policy |
 
@@ -40,6 +40,8 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
 | `PONYMAIL_API_SUFFIX` | `.json` | API endpoint suffix and method selector. `.json` (default) = POST with JSON body (native Foal). `.lua` = GET with query params (legacy compat for older deployments). |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
+| `PONYMAIL_AUTH_METHOD` | `cookie` | Default `login` method: `cookie` or `token`. See [Option 4](#option-4-future-browser-approved-session-token). |
+| `PONYMAIL_TOKEN` | *(none)* | Manual session token override (`pmt_…`). Takes precedence over `PONYMAIL_SESSION_COOKIE`. |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
 | `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |
 
@@ -214,9 +216,46 @@ To enable, add to your MCP server config:
 
 When this opt-in is active, the server prints a multi-line warning to stderr at startup so you can see in your MCP client's logs that the elevated mode is on. If the cookie isn't found in Chrome (or decryption fails — for instance Chrome ≥ ~127 may use App-Bound Encryption `v20` which we can't unwrap from Node), the tool falls back to the paste form.
 
+### Option 4 (FUTURE): browser-approved session token
+
+> [!NOTE]
+> **Not available on lists.apache.org yet.** This method needs a PonyMail
+> Foal release with short-term session tokens, and the ASF deploying it for
+> lists.apache.org with tokens enabled (`tokens.enabled` in `ponymail.yaml`).
+> Until then, `login` with `method: "token"` checks the server first and
+> reports that it does not support session tokens, without opening a browser.
+> Use Option 1 in the meantime.
+
+With `method: "token"` (or `PONYMAIL_AUTH_METHOD=token`), `login` does not
+touch cookies at all:
+
+1. The MCP server starts a one-shot listener on a random `127.0.0.1` port
+   and opens `https://lists.apache.org/token.html` in your browser.
+2. If needed, you log in to PonyMail as usual. The page shows who you are
+   logged in as, which client is asking (`ponymail-mcp`) and for how long,
+   and asks you to **Approve** or **Deny**.
+3. On approval, PonyMail mints a token and hands it back to the local
+   listener (a form POST to `127.0.0.1`, checked against a random `state`
+   value the MCP generated). The token is validated and cached in
+   `~/.ponymail-mcp/session.json` (owner-only permissions).
+
+The token is sent as `Authorization: Bearer pmt_…`. Compared to the cookie:
+
+- **Short-lived** — an hour by default, capped by the server.
+- **Read-only** — it cannot send email or use the admin console.
+- **Bound to your browser session** — logging out of PonyMail in the browser
+  revokes it; `logout` in the MCP revokes just the token, not your browser
+  session.
+- **Never exposes the session cookie** — nothing is copied out of DevTools
+  or the browser's cookie store.
+
+You can also approve a token manually by opening `token.html` without a
+`redirect_uri` and set it as `PONYMAIL_TOKEN`.
+
 ---
 
-Sessions expire after ~20 hours. Use `auth_status` to check, `logout` to clear.
+Cookie sessions expire after ~20 hours; session tokens at the time the server
+set. Use `auth_status` to check, `logout` to clear.
 
 ## Usage Examples
 

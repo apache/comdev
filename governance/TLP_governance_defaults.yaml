@@ -27,4 +27,3 @@ notify_private_list: true    # Results announced on private@
 # Account setup
 account_request_url: "https://whimsy.apache.org/officers/acreq"
 icla_info_url: "https://www.apache.org/licenses/contributor-agreements.html"
-

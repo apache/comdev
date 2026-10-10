@@ -21,7 +21,16 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadSession, performLogin, clearSession, autoExtractEnabled } from "./auth.js";
+import {
+  loadAuth,
+  authHeaders,
+  authMethod,
+  performLogin,
+  performTokenLogin,
+  revokeToken,
+  clearSession,
+  autoExtractEnabled,
+} from "./auth.js";
 import {
   restrictionFor,
   restrictionForAddress,
@@ -69,13 +78,8 @@ if (autoExtractEnabled()) {
 // ---------------------------------------------------------------------------
 
 async function apiFetch(path, params = {}) {
-  // Build headers — include session cookie if available
-  const headers = { Accept: "application/json" };
-  const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-  const sessionCookie = envCookie || loadSession();
-  if (sessionCookie) {
-    headers.Cookie = sessionCookie;
-  }
+  // Build headers — include session cookie or token if available
+  const headers = { Accept: "application/json", ...authHeaders() };
 
   let resp;
 
@@ -541,10 +545,7 @@ server.tool(
 
     // Fetch the raw source
     const url = new URL(`/api/source${API_SUFFIX}`, BASE_URL);
-    const headers = { Accept: "text/plain" };
-    const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-    const sessionCookie = envCookie || loadSession();
-    if (sessionCookie) headers.Cookie = sessionCookie;
+    const headers = { Accept: "text/plain", ...authHeaders() };
 
     let resp;
     if (API_SUFFIX === ".json") {
@@ -634,20 +635,54 @@ server.tool(
 // --- Tool: login ------------------------------------------------------------
 server.tool(
   "login",
-  "Authenticate to access private mailing lists. Opens a local helper page " +
-    "where you paste the ponymail session cookie copied from DevTools on " +
-    "lists.apache.org. Only needed for private/restricted lists — public " +
-    "lists work without auth.\n\n" +
-    "OPTIONAL: if the MCP server was started with the env var " +
-    "PONYMAIL_AUTO_EXTRACT_COOKIE=1, this tool will FIRST try to read the " +
-    "cookie out of the local Chrome cookie store (decrypting via macOS " +
-    "Keychain) and only fall back to the paste form if that fails. That " +
-    "path grants the MCP server broad access to your Chrome cookies and " +
-    "Keychain — only enable it if the MCP is running under additional " +
-    "isolation you trust (e.g. Apache Magpie or a similar sandbox).",
-  {},
-  async () => {
+  "Authenticate to access private mailing lists. Only needed for " +
+    "private/restricted lists — public lists work without auth.\n\n" +
+    'method "cookie" (default): opens a local helper page where you paste ' +
+    "the ponymail session cookie copied from DevTools on lists.apache.org. " +
+    "If the MCP server was started with PONYMAIL_AUTO_EXTRACT_COOKIE=1, it " +
+    "FIRST tries to read the cookie out of the local Chrome cookie store " +
+    "(decrypting via macOS Keychain) and only falls back to the paste form " +
+    "if that fails. That path grants the MCP server broad access to your " +
+    "Chrome cookies and Keychain — only enable it under additional isolation " +
+    "you trust (e.g. Apache Magpie or a similar sandbox).\n\n" +
+    'method "token": opens PonyMail\'s approval page in the browser; after ' +
+    "you click Approve, PonyMail hands a short-term, read-only session token " +
+    "back to this MCP server. No cookie copying. NOT YET AVAILABLE on " +
+    "lists.apache.org — it needs a PonyMail release with session tokens, " +
+    "deployed and enabled by the ASF; until then this method reports that " +
+    "the server does not support it. Default method comes from " +
+    "PONYMAIL_AUTH_METHOD.",
+  {
+    method: z
+      .enum(["cookie", "token"])
+      .optional()
+      .describe('Login method; defaults to PONYMAIL_AUTH_METHOD, else "cookie"'),
+  },
+  async ({ method }) => {
+    const chosen = method || authMethod();
     try {
+      if (chosen === "token") {
+        const result = await performTokenLogin(BASE_URL);
+        const who = result.user
+          ? ` as ${result.user.fullname}${result.user.email ? ` (${result.user.email})` : ""}`
+          : "";
+        const until = result.expires
+          ? ` It expires at ${new Date(result.expires * 1000).toISOString()}.`
+          : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `✅ Successfully authenticated${who}.\n\n` +
+                "Session token approved in the browser and cached. It is read-only " +
+                `and bound to your PonyMail browser session.${until}\n` +
+                "Use `auth_status` to check, `logout` to revoke it.",
+            },
+          ],
+        };
+      }
+
       const result = await performLogin(BASE_URL);
       const who = result.user
         ? ` as ${result.user.fullname}${result.user.email ? ` (${result.user.email})` : ""}`
@@ -670,11 +705,15 @@ server.tool(
         ],
       };
     } catch (err) {
+      const fallback =
+        chosen === "token"
+          ? 'Try again, or use method "cookie".'
+          : "Try again, or set PONYMAIL_SESSION_COOKIE env var manually.";
       return {
         content: [
           {
             type: "text",
-            text: `❌ Login failed: ${err.message}\n\nTry again, or set PONYMAIL_SESSION_COOKIE env var manually.`,
+            text: `❌ Login failed: ${err.message}\n\n${fallback}`,
           },
         ],
       };
@@ -685,14 +724,22 @@ server.tool(
 // --- Tool: logout -----------------------------------------------------------
 server.tool(
   "logout",
-  "Clear the cached PonyMail session cookie. After logout, only public lists " +
-    "will be accessible.",
+  "Clear the cached PonyMail session (cookie or session token). A cached " +
+    "session token is also revoked on the server. After logout, only public " +
+    "lists will be accessible.",
   {},
   async () => {
+    const auth = loadAuth();
+    let revoked = "";
+    if (auth && auth.type === "token" && auth.source === "file") {
+      revoked = (await revokeToken(BASE_URL, auth.value))
+        ? " The session token was revoked on the server."
+        : " The session token could not be revoked on the server; it stays valid until it expires.";
+    }
     clearSession();
     return {
       content: [
-        { type: "text", text: "Session cleared. Only public lists are accessible now." },
+        { type: "text", text: `Session cleared.${revoked} Only public lists are accessible now.` },
       ],
     };
   }
@@ -701,30 +748,34 @@ server.tool(
 // --- Tool: auth_status ------------------------------------------------------
 server.tool(
   "auth_status",
-  "Check current authentication status. Shows whether a session cookie is " +
-    "cached and if it's still valid.",
+  "Check current authentication status. Shows whether a session cookie or " +
+    "session token is cached and if it's still valid.",
   {},
   { readOnlyHint: true },
   async () => {
-    const envCookie = process.env.PONYMAIL_SESSION_COOKIE;
-    const sessionCookie = envCookie || loadSession();
+    const auth = loadAuth();
 
-    if (!sessionCookie) {
+    if (!auth) {
       return {
         content: [
           {
             type: "text",
-            text: "❌ Not authenticated. No session cookie found.\n\n" +
+            text: "❌ Not authenticated. No session cookie or token found.\n\n" +
               "Use `login` to authenticate, or set PONYMAIL_SESSION_COOKIE env var.",
           },
         ],
       };
     }
 
-    // Validate the cookie
+    const kind = auth.type === "token" ? "session token" : "session cookie";
+    const where = auth.source === "env"
+      ? `environment variable (${auth.type === "token" ? "PONYMAIL_TOKEN" : "PONYMAIL_SESSION_COOKIE"})`
+      : "cached session file";
+
+    // Validate the credential
     try {
       const url = new URL(`/api/preferences${API_SUFFIX}`, BASE_URL);
-      const headers = { Accept: "application/json", Cookie: sessionCookie };
+      const headers = { Accept: "application/json", ...authHeaders(auth) };
       let resp;
       if (API_SUFFIX === ".json") {
         headers["Content-Type"] = "application/json";
@@ -740,12 +791,18 @@ server.tool(
 
       if (data.login && data.login.credentials) {
         const creds = data.login.credentials;
+        const expires = (data.login.token && data.login.token.expires) || auth.expires;
+        const expiry = auth.type === "token" && expires
+          ? `Token expires at ${new Date(expires * 1000).toISOString()}.\n`
+          : "";
         return {
           content: [
             {
               type: "text",
               text: `✅ Authenticated as: ${creds.fullname || "Unknown"} (${creds.email || "N/A"})\n\n` +
-                `Source: ${envCookie ? "environment variable" : "cached session file"}\n` +
+                `Credential: ${kind}\n` +
+                `Source: ${where}\n` +
+                expiry +
                 "Session is valid.",
             },
           ],
@@ -755,8 +812,8 @@ server.tool(
           content: [
             {
               type: "text",
-              text: "⚠️ Session cookie found but no login credentials returned.\n" +
-                "The session may have expired. Use `login` to re-authenticate.",
+              text: `⚠️ ${kind[0].toUpperCase()}${kind.slice(1)} found but no login credentials returned.\n` +
+                "It may have expired or been revoked. Use `login` to re-authenticate.",
             },
           ],
         };

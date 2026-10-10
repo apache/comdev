@@ -36,12 +36,23 @@
  * - We cache it and use it for API requests
  *
  * Alternatively, set PONYMAIL_SESSION_COOKIE env var directly.
+ *
+ * Session tokens (PONYMAIL_AUTH_METHOD=token) — NOT YET AVAILABLE on
+ * lists.apache.org. Newer PonyMail Foal servers can mint short-term,
+ * read-only session tokens bound to the user's browser session. The MCP runs
+ * a loopback listener, opens PonyMail's token.html approval page, and the
+ * user clicks "Approve"; PonyMail then hands the token back to the loopback
+ * listener. No cookie copying, no access to the browser's cookie store. This
+ * needs a PonyMail release with the token endpoint, deployed and enabled by
+ * the ASF for lists.apache.org — until then performTokenLogin() detects the
+ * missing endpoint and says so.
  */
 
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { exec } from "node:child_process";
 import { extractPonymailCookie } from "./cookie-extract.js";
 
@@ -49,32 +60,85 @@ const SESSION_DIR = path.join(os.homedir(), ".ponymail-mcp");
 const SESSION_FILE = path.join(SESSION_DIR, "session.json");
 const CALLBACK_PORT = 39817;
 const LOGIN_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+const TOKEN_CLIENT_NAME = "ponymail-mcp";
+const TOKEN_CALLBACK_PATH = "/callback";
 
 // ---------------------------------------------------------------------------
 // Session persistence
 // ---------------------------------------------------------------------------
 
-export function loadSession() {
+function readSessionFile() {
   try {
     if (!fs.existsSync(SESSION_FILE)) return null;
-    const data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
-    if (data.timestamp && Date.now() - data.timestamp > 20 * 60 * 60 * 1000) {
-      console.error("[auth] Cached session expired");
-      return null;
-    }
-    return data.cookie || null;
+    return JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
   } catch {
     return null;
   }
 }
 
-function saveSession(cookie, userInfo = {}) {
-  fs.mkdirSync(SESSION_DIR, { recursive: true });
-  fs.writeFileSync(
-    SESSION_FILE,
-    JSON.stringify({ cookie, timestamp: Date.now(), user: userInfo }, null, 2)
-  );
+/**
+ * The cached session cookie, or null. A cached session token is not a cookie,
+ * so this returns null for it — use loadAuth() to get either kind.
+ */
+export function loadSession() {
+  const data = readSessionFile();
+  if (!data || data.type === "token") return null;
+  if (data.timestamp && Date.now() - data.timestamp > 20 * 60 * 60 * 1000) {
+    console.error("[auth] Cached session expired");
+    return null;
+  }
+  return data.cookie || null;
+}
+
+/**
+ * The credential to send to PonyMail, or null. Precedence: PONYMAIL_TOKEN env
+ * var, PONYMAIL_SESSION_COOKIE env var, then the cached session file (cookie
+ * or token, whichever the last login produced).
+ *
+ * @returns {{type: "cookie"|"token", value: string, source: "env"|"file",
+ *            expires?: number, user?: object} | null}
+ */
+export function loadAuth() {
+  const envToken = (process.env.PONYMAIL_TOKEN || "").trim();
+  if (envToken) return { type: "token", value: envToken, source: "env" };
+  const envCookie = (process.env.PONYMAIL_SESSION_COOKIE || "").trim();
+  if (envCookie) return { type: "cookie", value: envCookie, source: "env" };
+
+  const data = readSessionFile();
+  if (data && data.type === "token") {
+    // Treat a token as gone a minute early so it doesn't expire mid-request
+    if (!data.token || !data.expires || Date.now() / 1000 > data.expires - 60) {
+      if (data.token) console.error("[auth] Cached session token expired");
+      return null;
+    }
+    return { type: "token", value: data.token, source: "file", expires: data.expires, user: data.user };
+  }
+  const cookie = loadSession();
+  return cookie ? { type: "cookie", value: cookie, source: "file", user: data && data.user } : null;
+}
+
+/** HTTP headers that authenticate a request with the given (or current) credential */
+export function authHeaders(auth = loadAuth()) {
+  if (!auth) return {};
+  return auth.type === "token"
+    ? { Authorization: `Bearer ${auth.value}` }
+    : { Cookie: auth.value };
+}
+
+function writeSessionFile(payload) {
+  fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
+  // Owner-only: the file holds a live credential
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  fs.chmodSync(SESSION_FILE, 0o600);
   console.error(`[auth] Session saved to ${SESSION_FILE}`);
+}
+
+function saveSession(cookie, userInfo = {}) {
+  writeSessionFile({ cookie, timestamp: Date.now(), user: userInfo });
+}
+
+function saveToken(token, expires, userInfo = {}) {
+  writeSessionFile({ type: "token", token, expires, timestamp: Date.now(), user: userInfo });
 }
 
 /**
@@ -105,10 +169,14 @@ export function extractPonymailFromPaste(text) {
  * Returns { ok, user } on success, { ok: false, reason } on failure.
  */
 async function validateCookie(cookie, baseUrl) {
+  return validateAuth({ Cookie: cookie }, baseUrl);
+}
+
+async function validateAuth(headers, baseUrl) {
   try {
     const url = new URL("/api/preferences.lua", baseUrl);
     const resp = await fetch(url.toString(), {
-      headers: { Accept: "application/json", Cookie: cookie },
+      headers: { Accept: "application/json", ...headers },
     });
     if (!resp.ok) return { ok: false, reason: `HTTP ${resp.status}` };
     const data = await resp.json();
@@ -117,6 +185,7 @@ async function validateCookie(cookie, baseUrl) {
     return {
       ok: true,
       user: { fullname: creds.fullname || "Unknown", email: creds.email || "" },
+      token: data.login.token,
     };
   } catch (err) {
     return { ok: false, reason: err.message };
@@ -160,7 +229,7 @@ function openBrowser(url) {
     process.platform === "darwin"
       ? `open "${url}"`
       : process.platform === "win32"
-        ? `start "${url}"`
+        ? `start "" "${url}"`
         : `xdg-open "${url}"`;
   exec(cmd, (err) => {
     if (err) console.error("[auth] Could not open browser:", err.message);
@@ -180,6 +249,188 @@ function openBrowser(url) {
 export function autoExtractEnabled() {
   const v = (process.env.PONYMAIL_AUTO_EXTRACT_COOKIE || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * Login method selected by PONYMAIL_AUTH_METHOD: "cookie" (default — paste
+ * form, optionally Chrome auto-extract) or "token" (browser-approved session
+ * token; needs a PonyMail server with the token endpoint).
+ */
+export function authMethod() {
+  const v = (process.env.PONYMAIL_AUTH_METHOD || "").trim().toLowerCase();
+  return v === "token" ? "token" : "cookie";
+}
+
+/**
+ * Ask PonyMail whether it can issue session tokens. Servers without the token
+ * endpoint answer 404; servers that have it but keep it switched off say
+ * enabled: false.
+ *
+ * @returns {Promise<{supported: boolean, enabled: boolean, ttl?: number, max_ttl?: number, reason?: string}>}
+ */
+export async function probeTokenSupport(baseUrl) {
+  try {
+    const url = new URL("/api/token.lua", baseUrl);
+    url.searchParams.set("action", "info");
+    const resp = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+    if (resp.status === 404) {
+      return { supported: false, enabled: false, reason: "server has no token endpoint" };
+    }
+    if (!resp.ok) return { supported: false, enabled: false, reason: `HTTP ${resp.status}` };
+    const data = await resp.json();
+    return { supported: true, enabled: !!data.enabled, ttl: data.ttl, max_ttl: data.max_ttl };
+  } catch (err) {
+    return { supported: false, enabled: false, reason: err.message };
+  }
+}
+
+/** Best-effort server-side revocation of a session token (used on logout) */
+export async function revokeToken(baseUrl, token) {
+  try {
+    const url = new URL("/api/token.json", baseUrl);
+    const resp = await fetch(url.toString(), {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action: "revoke" }),
+    });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return !!(data.okay && data.revoked);
+  } catch {
+    return false;
+  }
+}
+
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+/**
+ * Log in with a browser-approved session token.
+ *
+ * Starts a listener on a random loopback port and opens PonyMail's token.html
+ * with client, redirect_uri and a random state. The user logs in to PonyMail
+ * (if needed) and approves; PonyMail POSTs the token back to the listener,
+ * which checks state, validates the token and caches it.
+ *
+ * Not usable against lists.apache.org until a PonyMail release with the token
+ * endpoint is deployed and enabled there — the probe below fails fast with a
+ * message that says so.
+ *
+ * @param {string} baseUrl - PonyMail base URL
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs] - Max time to wait for approval (default 3 min)
+ * @param {number} [opts.ttl] - Requested token lifetime in seconds (server caps it)
+ * @param {(url: string) => void} [opts.openUrl] - Opens the approval page (default: system browser)
+ * @returns {Promise<{token: string, expires: number, source: "token", user?: {fullname: string, email: string}}>}
+ */
+export async function performTokenLogin(baseUrl, opts = {}) {
+  const { timeoutMs = LOGIN_TIMEOUT_MS, ttl, openUrl = openBrowser } = opts;
+
+  const support = await probeTokenSupport(baseUrl);
+  if (!support.supported) {
+    throw new Error(
+      `${new URL(baseUrl).host} does not support session tokens (${support.reason}). ` +
+      "This login method needs a PonyMail Foal release with the token endpoint, " +
+      "deployed and enabled on the server — not yet the case for lists.apache.org. " +
+      "Use the default cookie login instead (unset PONYMAIL_AUTH_METHOD or call login with method \"cookie\")."
+    );
+  }
+  if (!support.enabled) {
+    throw new Error(
+      `${new URL(baseUrl).host} supports session tokens but has them switched off ` +
+      "(tokens.enabled in ponymail.yaml). Use the default cookie login instead."
+    );
+  }
+
+  const state = crypto.randomBytes(32).toString("base64url");
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    function settle(err, result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Let the result page finish sending before the listener goes away
+      setImmediate(() => server.close());
+      if (err) reject(err);
+      else resolve(result);
+    }
+
+    const timer = setTimeout(() => {
+      settle(new Error(
+        `No approval received after ${timeoutMs / 1000}s. Call login again to retry.`
+      ));
+    }, timeoutMs);
+
+    const server = http.createServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== TOKEN_CALLBACK_PATH) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
+        if (body.length > 16 * 1024) break;
+      }
+      const params = new URLSearchParams(body);
+
+      // Anything without our state was not started by us — ignore it and keep waiting
+      if (!sameSecret(params.get("state") || "", state)) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(resultPage(false, "This request did not come from the login you started."));
+        return;
+      }
+
+      if (params.get("error")) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(resultPage(false, "Token request denied. The MCP server was not given access."));
+        settle(new Error("The token request was denied in the browser."));
+        return;
+      }
+
+      const token = params.get("token") || "";
+      const result = await validateAuth({ Authorization: `Bearer ${token}` }, baseUrl);
+      if (!token || !result.ok) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(resultPage(false, `PonyMail did not accept the token: ${escapeHtml(result.reason || "empty")}`));
+        settle(new Error(`Token validation failed: ${result.reason || "empty token"}`));
+        return;
+      }
+
+      const expires = Number(params.get("expires")) || (result.token && result.token.expires) || 0;
+      saveToken(token, expires, result.user);
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(resultPage(true, `Authenticated as ${escapeHtml(result.user.fullname)} (${escapeHtml(result.user.email)})`));
+      settle(null, { token, expires, source: "token", user: result.user });
+    });
+
+    server.on("error", (err) => {
+      settle(new Error(`Could not start the local callback listener: ${err.message}`));
+    });
+
+    // Loopback only, random free port
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      const approval = new URL("/token.html", baseUrl);
+      approval.searchParams.set("client", TOKEN_CLIENT_NAME);
+      approval.searchParams.set("redirect_uri", `http://127.0.0.1:${port}${TOKEN_CALLBACK_PATH}`);
+      approval.searchParams.set("state", state);
+      if (ttl) approval.searchParams.set("ttl", String(ttl));
+      console.error(`[auth] Opening token approval page at ${approval}`);
+      openUrl(approval.toString());
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
 }
 
 /**
