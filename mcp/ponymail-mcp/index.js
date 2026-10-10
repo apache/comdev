@@ -637,12 +637,18 @@ server.tool(
   "login",
   "Authenticate to access private mailing lists. Only needed for " +
     "private/restricted lists — public lists work without auth.\n\n" +
-    'method "cookie" (default): opens a local helper page where you paste ' +
-    "the ponymail session cookie copied from DevTools on lists.apache.org. " +
-    "If the MCP server was started with PONYMAIL_AUTO_EXTRACT_COOKIE=1, it " +
-    "FIRST tries to read the cookie out of the local Chrome cookie store " +
-    "(decrypting via macOS Keychain) and only falls back to the paste form " +
-    "if that fails. That path grants the MCP server broad access to your " +
+    'method "cookie" (default): opens the lists.apache.org login page in a ' +
+    "temporary Chrome / Edge / Brave / Chromium window (fresh profile, deleted " +
+    "afterwards). The user just logs in there; the session cookie is read " +
+    "from that window automatically and the window closes — no copy & paste. " +
+    "Waits up to 5 minutes for the user to log in. With " +
+    "PONYMAIL_BROWSER_PROFILE=persistent the profile is kept between logins, " +
+    "so a still-valid login completes without typing. If no such browser is " +
+    "installed (or PONYMAIL_BROWSER=none), it opens a local helper page where " +
+    "the user pastes the cookie copied from DevTools instead. If the MCP " +
+    "server was started with PONYMAIL_AUTO_EXTRACT_COOKIE=1, it FIRST tries " +
+    "to read the cookie out of the local Chrome cookie store (decrypting via " +
+    "macOS Keychain). That path grants the MCP server broad access to your " +
     "Chrome cookies and Keychain — only enable it under additional isolation " +
     "you trust (e.g. Apache Magpie or a similar sandbox).\n\n" +
     'method "token": opens PonyMail\'s approval page in the browser; after ' +
@@ -687,10 +693,11 @@ server.tool(
       const who = result.user
         ? ` as ${result.user.fullname}${result.user.email ? ` (${result.user.email})` : ""}`
         : "";
-      const sourceLabel =
-        result.source === "browser"
-          ? "Cookie auto-extracted from local Chrome cookie store (opt-in via PONYMAIL_AUTO_EXTRACT_COOKIE)."
-          : "Cookie received from the paste form.";
+      const sourceLabel = {
+        browser: "Cookie auto-extracted from local Chrome cookie store (opt-in via PONYMAIL_AUTO_EXTRACT_COOKIE).",
+        "browser-login": "Cookie taken from the browser window you logged in with.",
+        paste: "Cookie received from the paste form.",
+      }[result.source];
       return {
         content: [
           {

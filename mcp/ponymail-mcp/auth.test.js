@@ -20,18 +20,19 @@
 // computed at module import time from os.homedir(), so each test spawns a
 // child node process with HOME pointed at a temporary directory.
 //
-// The interactive performLogin() flow (browser open, local HTTP server,
+// The interactive paste flow of performLogin() (local HTTP server,
 // cookie-paste form, network validation) is not covered by these tests —
 // it requires a real browser and network and belongs in an integration
 // suite. The session-token flow (performTokenLogin) is covered end to end
 // against a fake PonyMail server, with the browser simulated by the
-// openUrl hook.
+// openUrl hook. The browser login (performBrowserLogin) runs against a fake
+// browser that speaks the DevTools protocol over the same pipe Chrome uses.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -59,6 +60,8 @@ function runInChild(home, snippet, extraEnv = {}) {
   delete baseEnv.PONYMAIL_AUTH_METHOD;
   delete baseEnv.PONYMAIL_TOKEN;
   delete baseEnv.PONYMAIL_SESSION_COOKIE;
+  delete baseEnv.PONYMAIL_BROWSER;
+  delete baseEnv.PONYMAIL_BROWSER_PROFILE;
   const res = spawnSync("node", ["--input-type=module", "-e", code], {
     env: { ...baseEnv, ...extraEnv },
     encoding: "utf8",
@@ -526,5 +529,179 @@ test("revokeToken revokes on the server and reports failure for unknown tokens",
       return { ok, bad, revoked: seen.revoked };
     `);
     assert.deepEqual(out, { ok: true, bad: false, revoked: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Browser login against a fake browser and a fake PonyMail server
+// ---------------------------------------------------------------------------
+
+// A stand-in for Chrome: a node script that speaks the DevTools protocol over
+// --remote-debugging-pipe (commands on fd 3, replies on fd 4). FAKE_BROWSER_MODE
+// picks the scenario; everything it was asked is logged to FAKE_BROWSER_LOG.
+//   login — no cookie, then a rejected cookie, then a good one (plus a
+//           ponymail cookie for another host that must be ignored)
+//   close — the user closes the window without logging in
+//   hang  — the user never logs in
+const FAKE_BROWSER = `#!/usr/bin/env node
+const fs = require("node:fs");
+const mode = process.env.FAKE_BROWSER_MODE;
+const log = (entry) => fs.appendFileSync(process.env.FAKE_BROWSER_LOG, JSON.stringify(entry) + "\\n");
+log({ args: process.argv.slice(2) });
+const out = fs.createWriteStream(null, { fd: 4 });
+const reply = (id, result) => out.write(JSON.stringify({ id, result }) + "\\0");
+const other = { name: "ponymail", value: "elsewhere", domain: "lists.example.org" };
+const jars = [[], [{ name: "ponymail", value: "bad", domain: "127.0.0.1" }],
+  [other, { name: "ponymail", value: "good", domain: "127.0.0.1" }]];
+let polls = 0, buf = "";
+fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf("\\0")) >= 0) {
+    const msg = JSON.parse(buf.slice(0, i));
+    buf = buf.slice(i + 1);
+    log({ method: msg.method });
+    if (msg.method === "Browser.close") { reply(msg.id, {}); setTimeout(() => process.exit(0), 10); continue; }
+    if (msg.method === "Storage.getCookies") {
+      polls++;
+      if (mode === "close" && polls > 2) process.exit(0);
+      const cookies = mode === "login" ? jars[Math.min(polls - 1, jars.length - 1)] : [];
+      reply(msg.id, { cookies });
+    }
+  }
+});
+`;
+
+function fakeCookiePonymail() {
+  return `
+    const http = await import("node:http");
+    const fake = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url.startsWith("/api/preferences.lua") && req.headers.cookie === "ponymail=good") {
+        res.end(JSON.stringify({ login: { credentials: { fullname: "Test User", email: "test@apache.org" } } }));
+      } else {
+        res.end(JSON.stringify({ login: {} }));
+      }
+    });
+    await new Promise((r) => fake.listen(0, "127.0.0.1", r));
+    const base = "http://127.0.0.1:" + fake.address().port;
+  `;
+}
+
+function withFakeBrowser(home, mode, fn) {
+  const browserPath = path.join(home, "fake-browser.cjs");
+  writeFileSync(browserPath, FAKE_BROWSER, { mode: 0o755 });
+  const logPath = path.join(home, "browser.log");
+  writeFileSync(logPath, "");
+  const out = fn(browserPath, { FAKE_BROWSER_MODE: mode, FAKE_BROWSER_LOG: logPath });
+  const log = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  return { out, log };
+}
+
+const skipOnWindows = { skip: process.platform === "win32" };
+
+test("performBrowserLogin: picks up the logged-in cookie, caches it and cleans up", skipOnWindows, () => {
+  withTempHome((home) => {
+    const { out, log } = withFakeBrowser(home, "login", (browserPath, env) =>
+      runInChild(home, fakeCookiePonymail() + `
+        const result = await a.performBrowserLogin(base, { browserPath: ${JSON.stringify(browserPath)}, pollMs: 10 });
+        fake.close();
+        return { result, auth: a.loadAuth(), base };
+      `, env));
+    assert.equal(out.result.source, "browser-login");
+    assert.equal(out.result.cookie, "ponymail=good");
+    assert.deepEqual(out.result.user, { fullname: "Test User", email: "test@apache.org" });
+    assert.equal(out.auth.type, "cookie");
+    assert.equal(out.auth.value, "ponymail=good");
+
+    const args = log[0].args;
+    assert.ok(args.includes("--remote-debugging-pipe"));
+    assert.equal(args.at(-1), `${out.base}/oauth.html`);
+    const profile = args.find((x) => x.startsWith("--user-data-dir=")).slice("--user-data-dir=".length);
+    assert.equal(existsSync(profile), false, "temporary profile is deleted");
+
+    if (process.platform === "darwin") assert.ok(args.includes("--use-mock-keychain"));
+    if (process.platform === "linux") assert.ok(args.includes("--password-store=basic"));
+
+    const methods = log.slice(1).map((e) => e.method);
+    assert.equal(methods.filter((m) => m === "Storage.getCookies").length, 3);
+    assert.equal(methods.at(-1), "Browser.close");
+  });
+});
+
+test("performBrowserLogin: PONYMAIL_BROWSER_PROFILE=persistent keeps an owner-only profile on the real credential store", skipOnWindows, () => {
+  withTempHome((home) => {
+    const { out, log } = withFakeBrowser(home, "login", (browserPath, env) =>
+      runInChild(home, fakeCookiePonymail() + `
+        const result = await a.performBrowserLogin(base, { browserPath: ${JSON.stringify(browserPath)}, pollMs: 10 });
+        fake.close();
+        return { result };
+      `, { ...env, PONYMAIL_BROWSER_PROFILE: "persistent" }));
+    assert.equal(out.result.cookie, "ponymail=good");
+    const profile = path.join(home, ".ponymail-mcp", "browser-profile");
+    const args = log[0].args;
+    assert.ok(args.includes(`--user-data-dir=${profile}`));
+    assert.ok(!args.includes("--use-mock-keychain"));
+    assert.ok(!args.includes("--password-store=basic"));
+    assert.equal(existsSync(profile), true, "kept profile survives the login");
+    assert.equal(statSync(profile).mode & 0o777, 0o700);
+  });
+});
+
+test("browserProfileDir: temporary by default, kept on opt-in", () => {
+  withTempHome((home) => {
+    const run = (value) => runInChild(home, "return a.browserProfileDir();",
+      value === undefined ? {} : { PONYMAIL_BROWSER_PROFILE: value });
+    assert.equal(run(undefined), null);
+    assert.equal(run("temporary"), null);
+    assert.equal(run("relative/dir"), null);
+    assert.equal(run("persistent"), path.join(home, ".ponymail-mcp", "browser-profile"));
+    assert.equal(run("1"), path.join(home, ".ponymail-mcp", "browser-profile"));
+    assert.equal(run(path.join(home, "elsewhere")), path.join(home, "elsewhere"));
+  });
+});
+
+test("performBrowserLogin: closing the window before logging in fails the login", skipOnWindows, () => {
+  withTempHome((home) => {
+    const { out } = withFakeBrowser(home, "close", (browserPath, env) =>
+      runInChild(home, fakeCookiePonymail() + `
+        let error = null;
+        try { await a.performBrowserLogin(base, { browserPath: ${JSON.stringify(browserPath)}, pollMs: 10 }); }
+        catch (err) { error = err.message; }
+        fake.close();
+        return { error, auth: a.loadAuth() };
+      `, env));
+    assert.match(out.error, /closed before the login completed/);
+    assert.equal(out.auth, null);
+  });
+});
+
+test("performBrowserLogin: times out and closes the window when nobody logs in", skipOnWindows, () => {
+  withTempHome((home) => {
+    const { out, log } = withFakeBrowser(home, "hang", (browserPath, env) =>
+      runInChild(home, fakeCookiePonymail() + `
+        let error = null;
+        try { await a.performBrowserLogin(base, { browserPath: ${JSON.stringify(browserPath)}, pollMs: 10, timeoutMs: 200 }); }
+        catch (err) { error = err.message; }
+        fake.close();
+        return { error, auth: a.loadAuth() };
+      `, env));
+    assert.match(out.error, /not completed in the browser within 0.2s/);
+    assert.equal(out.auth, null);
+    assert.equal(log.at(-1).method, "Browser.close");
+  });
+});
+
+test("performBrowserLogin: a browser that cannot be started is reported as a launch failure", () => {
+  withTempHome((home) => {
+    const out = runInChild(home, fakeCookiePonymail() + `
+      let error = null;
+      try { await a.performBrowserLogin(base, { browserPath: ${JSON.stringify(path.join(home, "no-such-browser"))} }); }
+      catch (err) { error = { message: err.message, code: err.code }; }
+      fake.close();
+      return error;
+    `);
+    assert.equal(out.code, "BROWSER_LAUNCH_FAILED");
+    assert.match(out.message, /Could not start the browser/);
   });
 });
