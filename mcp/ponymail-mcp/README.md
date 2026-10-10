@@ -12,7 +12,7 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 | `get_thread` | Fetch a complete email thread (full tree + flat message list). Supports `find_parent` to navigate to thread root from any reply. |
 | `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
 | `get_mbox` | Download mbox-formatted archive data for bulk export |
-| `login` | Authenticate via ASF OAuth to access private mailing lists (`method`: `cookie` or `token`) |
+| `login` | Authenticate via ASF OAuth to access private mailing lists — log in in a temporary browser window and the session is picked up automatically (`method`: `cookie` or `token`) |
 | `logout` | Clear the cached session cookie or token (a token is also revoked on the server) |
 | `auth_status` | Check current authentication status |
 | `list_restrictions` | Show mailing list patterns blocked by server policy |
@@ -40,6 +40,8 @@ Refer to your MCP client's documentation for how to add a local stdio server.
 | `PONYMAIL_BASE_URL` | `https://lists.apache.org` | Base URL of the PonyMail instance |
 | `PONYMAIL_API_SUFFIX` | `.json` | API endpoint suffix and method selector. `.json` (default) = POST with JSON body (native Foal). `.lua` = GET with query params (legacy compat for older deployments). |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
+| `PONYMAIL_BROWSER` | *(auto-detect)* | Chromium-family browser used by `login` (Chrome, Edge, Brave, Chromium). `none` = always use the paste form. |
+| `PONYMAIL_BROWSER_PROFILE` | *(temporary)* | `persistent` keeps the `login` browser profile in `~/.ponymail-mcp/browser-profile` (or give an absolute path) so the login survives between sessions. See [Keeping the login between sessions](#keeping-the-login-between-sessions-opt-in). |
 | `PONYMAIL_AUTH_METHOD` | `cookie` | Default `login` method: `cookie` or `token`. See [Option 4](#option-4-future-browser-approved-session-token). |
 | `PONYMAIL_TOKEN` | *(none)* | Manual session token override (`pmt_…`). Takes precedence over `PONYMAIL_SESSION_COOKIE`. |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
@@ -167,9 +169,74 @@ what is currently allow-listed.
 
 Public lists work without authentication. For private/restricted lists:
 
-### Option 1: `login` tool — paste from DevTools (Default, Recommended)
+### Option 1: `login` tool — log in in the browser (Default, Recommended)
 
-From your MCP client, call the `login` tool. It opens a local helper page at `http://localhost:39817` with a paste form:
+From your MCP client, call the `login` tool. It opens the `lists.apache.org`
+login page in a **temporary Chrome / Edge / Brave / Chromium window**. Log in
+there as usual (ASF OAuth). As soon as PonyMail has logged you in, the MCP
+server picks up the session cookie from that window, validates it against
+`/api/preferences.lua`, caches it to `~/.ponymail-mcp/session.json` and closes
+the window. No DevTools, no copy & paste.
+
+How it works and what it can see:
+
+- The window runs with a **fresh, temporary browser profile** that is deleted
+  afterwards. Your everyday browser profile, its cookies and saved passwords
+  are never touched — which is also why you have to log in in that window even
+  if you are already logged in to `lists.apache.org` in your normal browser.
+- The MCP server talks to that window over the DevTools protocol on a private
+  pipe (`--remote-debugging-pipe`), not a network port, and only reads the
+  `ponymail` cookie for the PonyMail host.
+- A redirect straight back to the MCP server isn't possible: ASF OAuth only
+  redirects to registered ASF hosts, and the PonyMail cookie is HttpOnly, so
+  page scripts and bookmarklets cannot read it.
+- `login` waits up to 5 minutes; closing the window cancels the login.
+
+The browser is auto-detected. Set `PONYMAIL_BROWSER` to the path of a
+Chromium-family executable to pick one, or to `none` to always use the paste
+form below.
+
+#### Keeping the login between sessions (opt-in)
+
+The PonyMail session expires after ~20 hours, after which `login` opens a
+fresh window and you log in again. To avoid retyping, keep the browser profile:
+
+```jsonc
+"env": { "PONYMAIL_BROWSER_PROFILE": "persistent" }
+```
+
+The profile then lives in `~/.ponymail-mcp/browser-profile` (owner-only), or
+at an absolute path you give instead of `persistent`. The ASF OAuth and
+PonyMail login stay in it, and you can let the browser's password manager save
+your ASF password there. The next `login` is then a click on *Log in* (or
+nothing at all while the PonyMail session in the profile is still valid), and
+the window closes by itself.
+
+What protects it:
+
+- **Encrypted at rest.** A kept profile uses the OS credential store (macOS
+  Keychain, Linux keyring) — not the mock store used for throwaway profiles —
+  so its cookies and saved passwords are encrypted with a key that only the
+  browser can read without an OS prompt.
+- **Not handed to the LLM.** The MCP server only returns "logged in as …" to
+  the client — never the cookie or the password.
+- **Outside the agent sandbox.** Keep `~/.ponymail-mcp/` out of the read
+  allowlist of your agent sandbox (it already holds `session.json`), so agent
+  shell commands cannot read the profile.
+
+What it does **not** protect against: anything that can run commands outside
+a sandbox as your user can start the browser on that profile and read its
+cookies the same way this server does. Approve sandbox-bypass requests with
+that in mind. Delete the directory to forget the login; `logout` clears only
+the cached session cookie, not the profile.
+
+Only one browser can use the profile at a time — if a window from a previous
+`login` is still open, close it before calling `login` again.
+
+### Option 1b: paste from DevTools (fallback)
+
+If no Chromium-family browser is found (or `PONYMAIL_BROWSER=none`), `login`
+opens a local helper page at `http://localhost:39817` with a paste form instead:
 
 1. On `lists.apache.org` (while logged in), open DevTools (`Cmd+Option+I` / `F12`).
 2. Go to the **Network** tab and reload the page.
@@ -194,7 +261,7 @@ The env var always wins over the cached session file.
 > [!CAUTION]
 > **Only enable this if you are running this MCP server under additional isolation (sandboxing, a hardened launcher such as Apache Magpie, or equivalent) and you understand the security tradeoff. Do NOT enable it on a bare install.**
 >
-> When `PONYMAIL_AUTO_EXTRACT_COOKIE=1` is set, the `login` tool will, before showing the paste form, do **two things that grant the MCP server broad access to your system**:
+> When `PONYMAIL_AUTO_EXTRACT_COOKIE=1` is set, the `login` tool will, before opening the login window, do **two things that grant the MCP server broad access to your system**:
 >
 > 1. **Read your local Chrome cookie database** (`~/Library/Application Support/Google/Chrome/<Profile>/Cookies` and the equivalent paths for Chromium-family browsers like Brave, Edge, Vivaldi, Arc, Opera). That file contains session cookies for **every site** you are logged in to in Chrome, not just lists.apache.org. The code only ever queries the single row for `host=lists.apache.org / name=ponymail`, but the OS-level read permission you are granting is "the entire cookie file".
 > 2. **Access your macOS Keychain entry "Chrome Safe Storage"** via `/usr/bin/security` to obtain the AES key that decrypts cookie values. macOS will prompt you for keychain approval on first use; once granted, the MCP process can decrypt **any** cookie value in the Chrome DB.
@@ -214,7 +281,7 @@ To enable, add to your MCP server config:
 }
 ```
 
-When this opt-in is active, the server prints a multi-line warning to stderr at startup so you can see in your MCP client's logs that the elevated mode is on. If the cookie isn't found in Chrome (or decryption fails — for instance Chrome ≥ ~127 may use App-Bound Encryption `v20` which we can't unwrap from Node), the tool falls back to the paste form.
+When this opt-in is active, the server prints a multi-line warning to stderr at startup so you can see in your MCP client's logs that the elevated mode is on. If the cookie isn't found in Chrome (or decryption fails — for instance Chrome ≥ ~127 may use App-Bound Encryption `v20` which we can't unwrap from Node), the tool falls back to the browser login window (Option 1).
 
 ### Option 4 (FUTURE): browser-approved session token
 

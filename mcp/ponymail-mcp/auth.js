@@ -18,22 +18,22 @@
 /**
  * auth.js — PonyMail session management
  *
- * PonyMail Foal handles OAuth entirely server-side — the auth code from ASF OAuth
- * can only be exchanged by PonyMail's own backend (its redirect_uri is registered
- * with ASF OAuth, not ours). So we can't replicate the OAuth exchange from a CLI.
+ * PonyMail Foal handles OAuth entirely server-side, and ASF OAuth only
+ * redirects back to registered ASF hosts — so we can't receive the OAuth code
+ * on a loopback listener and replicate the exchange from a CLI. The resulting
+ * `ponymail` session cookie is HttpOnly, so no page script can read it either.
  *
- * Instead, this module:
- * 1. Opens the PonyMail login page in the user's browser
- * 2. Runs a tiny local server that waits for the user to paste their cookie
- *    OR watches for the cookie file to appear (if using browser extension)
- * 3. Caches the session cookie to ~/.ponymail-mcp/session.json
- *
- * The simplest reliable flow:
- * - Open lists.apache.org/oauth.html in the browser
- * - User logs in (ASF LDAP)
- * - After login, PonyMail sets a session cookie in the browser
- * - User copies the cookie value from DevTools (or we provide a bookmarklet)
- * - We cache it and use it for API requests
+ * Cookie login therefore works like this (first that applies wins):
+ * 1. PONYMAIL_AUTO_EXTRACT_COOKIE=1 (opt-in): read the cookie out of the local
+ *    Chrome cookie store (cookie-extract.js).
+ * 2. Browser login (default): open the PonyMail login page in a throwaway
+ *    Chromium-family browser window with a temporary profile, let the user log
+ *    in, and read the cookie from that window over the DevTools protocol
+ *    (browser-login.js). No copy & paste.
+ * 3. Paste form: when no Chromium-family browser is available (or
+ *    PONYMAIL_BROWSER=none), serve a local page where the user pastes the
+ *    cookie copied from DevTools.
+ * The cookie is validated and cached to ~/.ponymail-mcp/session.json.
  *
  * Alternatively, set PONYMAIL_SESSION_COOKIE env var directly.
  *
@@ -55,11 +55,14 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { exec } from "node:child_process";
 import { extractPonymailCookie } from "./cookie-extract.js";
+import { findBrowser, loginInBrowser } from "./browser-login.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".ponymail-mcp");
 const SESSION_FILE = path.join(SESSION_DIR, "session.json");
 const CALLBACK_PORT = 39817;
 const LOGIN_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+const BROWSER_LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // typing an ASF password takes a while
+const BROWSER_PROFILE_DIR = path.join(SESSION_DIR, "browser-profile");
 const TOKEN_CLIENT_NAME = "ponymail-mcp";
 const TOKEN_CALLBACK_PATH = "/callback";
 
@@ -434,20 +437,86 @@ function escapeHtml(s) {
 }
 
 /**
- * Perform login.
+ * The browser profile to keep between logins, or null for a throwaway one.
+ * PONYMAIL_BROWSER_PROFILE=persistent keeps it in ~/.ponymail-mcp/browser-profile;
+ * an absolute path keeps it there instead.
+ */
+export function browserProfileDir() {
+  const v = (process.env.PONYMAIL_BROWSER_PROFILE || "").trim();
+  if (!v || ["temporary", "temp", "0", "false", "no", "off"].includes(v.toLowerCase())) return null;
+  if (["persistent", "1", "true", "yes", "on"].includes(v.toLowerCase())) return BROWSER_PROFILE_DIR;
+  if (path.isAbsolute(v)) return v;
+  console.error(`[auth] ignoring PONYMAIL_BROWSER_PROFILE=${v}: use "persistent" or an absolute path`);
+  return null;
+}
+
+/**
+ * Log in through a browser window (see browser-login.js).
  *
- * Default flow (auto-extract OFF): opens a local HTTP server with a paste
- * form where the user pastes the ponymail cookie copied from DevTools.
+ * Opens PonyMail's login page in a Chromium-family browser with a temporary
+ * profile, waits until the user has logged in, then takes the session cookie
+ * from that window, validates it and caches it. The window is closed and the
+ * profile deleted afterwards — unless PONYMAIL_BROWSER_PROFILE keeps it, in
+ * which case a still-valid login in that profile completes without typing.
  *
- * If PONYMAIL_AUTO_EXTRACT_COOKIE=1 is set in the environment, the function
- * FIRST tries to read the cookie out of the local Chrome (or Chromium-family)
- * cookie store via cookie-extract.js. Only falls back to the paste form if
- * the auto-extract returns nothing or doesn't validate.
+ * @param {string} baseUrl - PonyMail base URL
+ * @param {object} [opts]
+ * @param {string} [opts.browserPath] - Browser executable (default: findBrowser())
+ * @param {number} [opts.timeoutMs] - Max time to wait for the login (default 5 min)
+ * @param {number} [opts.pollMs] - How often to check for the cookie (default 1 s)
+ * @param {string|null} [opts.profileDir] - Profile to keep (default: browserProfileDir())
+ * @returns {Promise<{cookie: string, source: "browser-login", user: {fullname: string, email: string}}>}
+ */
+export async function performBrowserLogin(baseUrl, opts = {}) {
+  const {
+    browserPath = findBrowser(),
+    timeoutMs = BROWSER_LOGIN_TIMEOUT_MS,
+    pollMs,
+    profileDir = browserProfileDir(),
+  } = opts;
+  if (!browserPath) {
+    throw new Error(
+      "No Chrome, Edge, Brave or Chromium found for the browser login. " +
+      "Set PONYMAIL_BROWSER to the browser executable."
+    );
+  }
+  const startUrl = new URL("/oauth.html", baseUrl).toString();
+  console.error(
+    `[auth] Opening ${startUrl} in ${path.basename(browserPath)} ` +
+    (profileDir ? `with the kept profile ${profileDir}` : "with a temporary profile")
+  );
+  const { cookie, accepted } = await loginInBrowser({
+    browserPath,
+    startUrl,
+    host: new URL(baseUrl).hostname,
+    timeoutMs,
+    pollMs,
+    profileDir: profileDir || undefined,
+    accept: async (candidate) => {
+      const result = await validateCookie(candidate, baseUrl);
+      return result.ok ? result.user : null;
+    },
+  });
+  saveSession(cookie, accepted);
+  return { cookie, source: "browser-login", user: accepted };
+}
+
+/**
+ * Perform cookie login.
+ *
+ * 1. If PONYMAIL_AUTO_EXTRACT_COOKIE=1 is set, first try to read the cookie
+ *    out of the local Chrome (or Chromium-family) cookie store via
+ *    cookie-extract.js.
+ * 2. Otherwise (or if that finds nothing), log in through a throwaway browser
+ *    window and take the cookie from it — performBrowserLogin().
+ * 3. Only when no Chromium-family browser can be started (or
+ *    PONYMAIL_BROWSER=none), fall back to the local paste form where the
+ *    user pastes the cookie copied from DevTools.
  *
  * @param {string} baseUrl - PonyMail base URL
  * @param {object} [opts]
  * @param {number} [opts.timeoutMs] - Max time to wait for paste flow (default 3 min)
- * @returns {Promise<{cookie: string, source: "browser"|"paste", user?: {fullname: string, email: string}}>}
+ * @returns {Promise<{cookie: string, source: "browser"|"browser-login"|"paste", user?: {fullname: string, email: string}}>}
  */
 export async function performLogin(baseUrl, opts = {}) {
   const { timeoutMs = LOGIN_TIMEOUT_MS } = opts;
@@ -457,7 +526,19 @@ export async function performLogin(baseUrl, opts = {}) {
     if (extracted) {
       return { cookie: extracted.cookie, source: "browser", user: extracted.user };
     }
-    console.error("[auth] no ponymail cookie found in local Chrome — falling back to paste flow");
+    console.error("[auth] no ponymail cookie found in local Chrome — falling back to browser login");
+  }
+
+  const browserPath = findBrowser();
+  if (browserPath) {
+    try {
+      return await performBrowserLogin(baseUrl, { browserPath });
+    } catch (err) {
+      if (err.code !== "BROWSER_LAUNCH_FAILED") throw err;
+      console.error(`[auth] ${err.message} — falling back to paste flow`);
+    }
+  } else {
+    console.error("[auth] no Chromium-family browser for the browser login — falling back to paste flow");
   }
 
   return new Promise((resolve, reject) => {
@@ -660,6 +741,7 @@ export function loginPage(baseUrl) {
 <body>
   <h1>🐴 PonyMail MCP — Authenticate</h1>
   <p class="sub">Three short steps. Most of it is copy-paste; we figure out the rest.</p>
+  <p class="hint">Normally <code>login</code> skips this page: it opens a temporary Chrome / Edge / Brave / Chromium window, you log in, and the cookie is picked up automatically. You're seeing the paste form because no such browser was found or could be started (or <code>PONYMAIL_BROWSER=none</code> is set). Point <code>PONYMAIL_BROWSER</code> at the browser executable to use that flow.</p>
 
   <div class="step">
     <div class="step-num">1</div>
