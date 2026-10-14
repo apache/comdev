@@ -746,6 +746,18 @@ server.tool(
 // ---------------------------------------------------------------------------
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // Node's built-in fetch only uses proxy variables when NODE_USE_ENV_PROXY=1
+  // is set at startup, so a proxy variable alone would be silently ignored.
+  if (
+    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"].some((v) => process.env[v]) &&
+    !process.env.NODE_USE_ENV_PROXY
+  ) {
+    console.error(
+      "apache-projects-mcp: a proxy variable is set but NODE_USE_ENV_PROXY is not; " +
+        "requests will NOT use the proxy. Set NODE_USE_ENV_PROXY=1 in the server environment."
+    );
+  }
+
   // Warm cache on startup (non-blocking — tools will fetch on demand if this is slow)
   warmCache().catch(() => {});
 

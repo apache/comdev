@@ -19,6 +19,8 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 
 ## Setup
 
+Requires Node.js 22.21 or later.
+
 ```bash
 cd ponymail-mcp
 npm install
@@ -32,6 +34,22 @@ Add a local (stdio) MCP server with:
 - **Args**: `/path/to/ponymail-mcp/index.js`
 
 Refer to your MCP client's documentation for how to add a local stdio server.
+
+### Behind a proxy
+
+Node's built-in `fetch` only honors `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
+when `NODE_USE_ENV_PROXY=1` is set at process startup. Set both in the
+server's `env` block:
+
+```json
+"env": {
+  "HTTPS_PROXY": "http://proxy.example.com:3128",
+  "NODE_USE_ENV_PROXY": "1"
+}
+```
+
+The server prints a warning to stderr if a proxy variable is set without
+`NODE_USE_ENV_PROXY`.
 
 ## Environment Variables
 

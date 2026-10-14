@@ -9,6 +9,9 @@
     "test": "node --test",
     "licenses": "node ../../scripts/check-licenses.mjs ."
   },
+  "engines": {
+    "node": ">=22.21"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.0.0"
