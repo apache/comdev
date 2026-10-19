@@ -47,7 +47,8 @@ prek install -t pre-commit -t commit-msg -t pre-push
 
 This installs three hook types:
 - **pre-commit** — fast checks: license headers, trailing whitespace, YAML/JSON
-  validity, workflow + dependabot schema validation.
+  validity, workflow + dependabot schema validation, `package.json` /
+  `package-lock.json` sync.
 - **commit-msg** — rejects `Co-authored-by:` trailers (see policy above).
 - **pre-push** — the full suite: MCP test suites, dependency license allowlist,
   and `zizmor` GitHub Actions lint.
@@ -88,7 +89,10 @@ npm run licenses           # dependency license allowlist check
   go in a per-project `.license-allowlist-exceptions.json`.
 - **Lock files are committed.** `package-lock.json` is tracked for reproducible
   installs and license checks — commit it alongside `package.json` changes and
-  install with `npm ci`.
+  install with `npm ci`. The `package-lock-sync` pre-commit hook
+  (`scripts/check-package-lock.mjs`) fails if the lock file's root entry no
+  longer matches `package.json` (name, version, dependencies, `engines`, ...);
+  fix it with `npm install --package-lock-only` in the project directory.
 - **GitHub Actions** are SHA-pinned (with a `# vX.Y.Z` comment), use top-level
   `permissions: {}` with minimal per-job grants, and set
   `persist-credentials: false` on checkout. `zizmor` enforces this.
