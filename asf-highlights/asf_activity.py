@@ -25,7 +25,21 @@ import sys
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+# Optional explicit reporting month (datetime for the 1st of that month).
+# When None, reports on the month before today (original behavior).
+TARGET_MONTH = None
+
+def set_target_month(year, month):
+    """Set an explicit reporting month for backfilling past months."""
+    global TARGET_MONTH
+    TARGET_MONTH = datetime(year, month, 1)
+
 def get_date_range():
+    if TARGET_MONTH is not None:
+        month_start = TARGET_MONTH.replace(day=1)
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
+        month_end = next_month - timedelta(days=1)
+        return month_start, month_end
     today = datetime.now()
     last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
     last_month_end = today.replace(day=1) - timedelta(days=1)
@@ -184,19 +198,39 @@ if __name__ == "__main__":
         print("  releases          Show releases made last month")
         print("  all               Show all reports (default)")
         print("  -m, --markdown    Save output to a timestamped .md file")
+        print("  --month YYYY-MM   Report on a specific month (backfill past months)")
         print("  -h, --help        Show this help message")
         print("\nExamples:")
         print("  asf_activity.py")
         print("  asf_activity.py committers")
         print("  asf_activity.py pmc releases --markdown")
+        print("  asf_activity.py all --markdown --month 2026-09")
         sys.exit(0)
+
+    # Optional explicit reporting month: --month YYYY-MM
+    target_month = None
+    if "--month" in args:
+        i = args.index("--month")
+        try:
+            target_month = args[i + 1]
+        except IndexError:
+            print("Error: --month requires a YYYY-MM argument", file=sys.stderr)
+            sys.exit(1)
+        try:
+            dt = datetime.strptime(target_month, "%Y-%m")
+        except ValueError:
+            print(f"Error: invalid --month value '{target_month}' (expected YYYY-MM)", file=sys.stderr)
+            sys.exit(1)
+        set_target_month(dt.year, dt.month)
+        del args[i:i + 2]
 
     markdown = "-m" in args or "--markdown" in args
     args = [a for a in args if a not in ("-m", "--markdown")]
 
     outfile = None
     if markdown:
-        filename = f"activity_{datetime.now().strftime('%Y_%m_%d')}.md"
+        stamp = TARGET_MONTH.strftime("%Y_%m_01") if TARGET_MONTH else datetime.now().strftime("%Y_%m_%d")
+        filename = f"activity_{stamp}.md"
         outfile = open(filename, "w")
         sys.stdout = outfile
 
