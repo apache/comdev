@@ -96,7 +96,7 @@ Node's built-in `fetch` only honors `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
 when `NODE_USE_ENV_PROXY=1` is set at process startup. Set both in the
 server's `env` block:
 
-```
+```json
 "env": {
   "HTTPS_PROXY": "http://proxy.example.com:3128",
   "NODE_USE_ENV_PROXY": "1"
