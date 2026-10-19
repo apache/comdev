@@ -14,7 +14,6 @@ default_install_hook_types: [pre-commit, commit-msg, pre-push]
 exclude: |
   (?x)^(
     (.*/)?node_modules/.*|
-    (.*/)?package-lock\.json|
     (.*/)?LICENSE|
     \.github/license-header\.txt
   )$
@@ -69,6 +68,12 @@ repos:
         entry: scripts/check-no-coauthor.sh
         language: script
         stages: [commit-msg]
+
+      - id: package-lock-sync
+        name: package.json and package-lock.json in sync
+        entry: node scripts/check-package-lock.mjs
+        language: system
+        files: (^|/)package(-lock)?\.json$
 
       - id: mcp-tests
         name: MCP server tests (pre-push)
