@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         project: ["ponymail-mcp", "apache-projects-mcp"]
-        node-version: ["22"]
+        node-version: ["22.21", "24"]
 
     defaults:
       run:
