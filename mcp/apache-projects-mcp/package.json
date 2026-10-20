@@ -10,7 +10,7 @@
     "licenses": "node ../../scripts/check-licenses.mjs ."
   },
   "engines": {
-    "node": ">=22.21"
+    "node": "^22.21 || >=24"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

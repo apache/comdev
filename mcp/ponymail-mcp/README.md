@@ -19,7 +19,7 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 
 ## Setup
 
-Requires Node.js 22.21 or later.
+Requires Node.js 22.21+ (22.x line) or 24+; Node 23 lacks the env proxy support.
 
 ```bash
 cd ponymail-mcp

@@ -750,7 +750,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // NODE_USE_ENV_PROXY=1 or --use-env-proxy (on the CLI or in NODE_OPTIONS), so a
   // proxy variable alone would be silently ignored. Rather than re-implement
   // Node's parsing of those, check whether it installed its proxy dispatcher.
-  // Node older than 22.21 has no env proxy support at all ("engines" is only
+  // Node older than 22.21, and Node 23, have no env proxy support ("engines" is only
   // advisory), so there the fix is upgrading, not setting the variable.
   if (
     ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"].some((v) => process.env[v]) &&
@@ -758,13 +758,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   ) {
     const [major, minor] = process.versions.node.split(".").map(Number);
     // Added in Node 24.0 and backported to 22.21; Node 23 never got it.
+    // The dispatcher check above reads an undici-internal global, so a custom
+    // dispatcher (or a future undici change) can trigger a false warning; it
+    // only warns, never blocks.
     const nodeHasEnvProxy = major >= 24 || (major === 22 && minor >= 21);
     console.error(
       "apache-projects-mcp: a proxy variable is set but Node's env proxy support is off; " +
         "requests will NOT use the proxy. " +
         (nodeHasEnvProxy
           ? "Set NODE_USE_ENV_PROXY=1 in the server environment."
-          : `Node ${process.versions.node} cannot use a proxy; upgrade to Node 22.21 or later.`)
+          : `Node ${process.versions.node} cannot use a proxy; upgrade to Node 22.21+ (22.x line) or 24+.`)
     );
   }
 

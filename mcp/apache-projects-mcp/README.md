@@ -50,7 +50,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 ## Requirements
 
-- Node.js 22.21 or later
+- Node.js 22.21+ (22.x line) or 24+ (Node 23 lacks the env proxy support)
 - An MCP-compatible client
 
 ## Installation
