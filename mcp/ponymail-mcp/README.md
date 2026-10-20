@@ -48,8 +48,9 @@ server's `env` block:
 }
 ```
 
-The server prints a warning to stderr if a proxy variable is set without
-`NODE_USE_ENV_PROXY`.
+The server prints a warning to stderr if a proxy variable is set but Node's
+proxy support is off. Only the value `1` enables it; `--use-env-proxy` in
+`NODE_OPTIONS` works too.
 
 ## Environment Variables
 

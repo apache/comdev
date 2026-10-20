@@ -746,15 +746,25 @@ server.tool(
 // ---------------------------------------------------------------------------
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  // Node's built-in fetch only uses proxy variables when NODE_USE_ENV_PROXY=1
-  // is set at startup, so a proxy variable alone would be silently ignored.
+  // Node's built-in fetch only uses proxy variables when started with
+  // NODE_USE_ENV_PROXY=1 or --use-env-proxy (on the CLI or in NODE_OPTIONS), so a
+  // proxy variable alone would be silently ignored. Rather than re-implement
+  // Node's parsing of those, check whether it installed its proxy dispatcher.
+  // Node older than 22.21 has no env proxy support at all ("engines" is only
+  // advisory), so there the fix is upgrading, not setting the variable.
   if (
     ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"].some((v) => process.env[v]) &&
-    !process.env.NODE_USE_ENV_PROXY
+    globalThis[Symbol.for("undici.globalDispatcher.1")]?.constructor?.name !== "EnvHttpProxyAgent"
   ) {
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    // Added in Node 24.0 and backported to 22.21; Node 23 never got it.
+    const nodeHasEnvProxy = major >= 24 || (major === 22 && minor >= 21);
     console.error(
-      "apache-projects-mcp: a proxy variable is set but NODE_USE_ENV_PROXY is not; " +
-        "requests will NOT use the proxy. Set NODE_USE_ENV_PROXY=1 in the server environment."
+      "apache-projects-mcp: a proxy variable is set but Node's env proxy support is off; " +
+        "requests will NOT use the proxy. " +
+        (nodeHasEnvProxy
+          ? "Set NODE_USE_ENV_PROXY=1 in the server environment."
+          : `Node ${process.versions.node} cannot use a proxy; upgrade to Node 22.21 or later.`)
     );
   }
 
