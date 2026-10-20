@@ -7,8 +7,8 @@ repository. Read this before making changes.
 
 | Path | What it is | Toolchain |
 |------|------------|-----------|
-| `mcp/ponymail-mcp/` | MCP server for Apache PonyMail archives | Node.js (≥20), npm |
-| `mcp/apache-projects-mcp/` | MCP server for `projects.apache.org` data | Node.js (≥20), npm |
+| `mcp/ponymail-mcp/` | MCP server for Apache PonyMail archives | Node.js (^22.21 or ≥24), npm |
+| `mcp/apache-projects-mcp/` | MCP server for `projects.apache.org` data | Node.js (^22.21 or ≥24), npm |
 | `asf-highlights/` | ASF activity / birthday report scripts | Python via `uv` (PEP-723 inline scripts) |
 | `project-activity/` | Project activity report script | Python via `uv` (PEP-723 inline scripts) |
 | `scripts/` | Repo tooling (license allowlist check, git hooks) | Node / Bash |

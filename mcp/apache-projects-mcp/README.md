@@ -50,7 +50,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 ## Requirements
 
-- Node.js 20 or later
+- Node.js 22.21+ (22.x line) or 24+ (Node 23 lacks the env proxy support)
 - An MCP-compatible client
 
 ## Installation
@@ -89,6 +89,23 @@ Example stdio configuration:
 ```
 
 Adjust the path to match your local checkout.
+
+### Behind a proxy
+
+Node's built-in `fetch` only honors `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
+when `NODE_USE_ENV_PROXY=1` is set at process startup. Set both in the
+server's `env` block:
+
+```json
+"env": {
+  "HTTPS_PROXY": "http://proxy.example.com:3128",
+  "NODE_USE_ENV_PROXY": "1"
+}
+```
+
+The server prints a warning to stderr if a proxy variable is set but Node's
+proxy support is off. Only the value `1` enables it; `--use-env-proxy` in
+`NODE_OPTIONS` works too.
 
 ## Example questions
 
