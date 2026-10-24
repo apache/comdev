@@ -60,7 +60,7 @@ proxy support is off. Only the value `1` enables it; `--use-env-proxy` in
 | `PONYMAIL_API_SUFFIX` | `.json` | API endpoint suffix and method selector. `.json` (default) = POST with JSON body (native Foal). `.lua` = GET with query params (legacy compat for older deployments). |
 | `PONYMAIL_SESSION_COOKIE` | *(none)* | Manual session cookie override (skips OAuth flow) |
 | `PONYMAIL_BROWSER` | *(auto-detect)* | Chromium-family browser used by `login` (Chrome, Edge, Brave, Chromium). `none` = always use the paste form. |
-| `PONYMAIL_BROWSER_PROFILE` | *(temporary)* | `persistent` keeps the `login` browser profile in `~/.ponymail-mcp/browser-profile` (or give an absolute path) so the login survives between sessions. See [Keeping the login between sessions](#keeping-the-login-between-sessions-opt-in). |
+| `PONYMAIL_BROWSER_PROFILE` | *(temporary)* | `persistent` keeps the `login` browser profile in `~/.ponymail-mcp/browser-profile` (or give an absolute path) so the browser can save your ASF password between logins; 2FA is still asked every time. See [Keeping the login between sessions](#keeping-the-login-between-sessions-opt-in). |
 | `PONYMAIL_AUTH_METHOD` | `cookie` | Default `login` method: `cookie` or `token`. See [Option 4](#option-4-future-browser-approved-session-token). |
 | `PONYMAIL_TOKEN` | *(none)* | Manual session token override (`pmt_…`). Takes precedence over `PONYMAIL_SESSION_COOKIE`. |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
@@ -218,18 +218,20 @@ form below.
 #### Keeping the login between sessions (opt-in)
 
 The PonyMail session expires after ~20 hours, after which `login` opens a
-fresh window and you log in again. To avoid retyping, keep the browser profile:
+fresh window and you log in again. To avoid retyping your password, keep the
+browser profile:
 
 ```jsonc
 "env": { "PONYMAIL_BROWSER_PROFILE": "persistent" }
 ```
 
 The profile then lives in `~/.ponymail-mcp/browser-profile` (owner-only), or
-at an absolute path you give instead of `persistent`. The ASF OAuth and
-PonyMail login stay in it, and you can let the browser's password manager save
-your ASF password there. The next `login` is then a click on *Log in* (or
-nothing at all while the PonyMail session in the profile is still valid), and
-the window closes by itself.
+at an absolute path you give instead of `persistent`. You can let the
+browser's password manager save your ASF password there, so the next `login`
+fills it in. The profile's cookies are cleared every time the login window
+closes, so the ASF OAuth session is not kept: every `login` still asks for
+2FA, and once the PonyMail session (~20 hours) has expired nothing in the
+profile can log in for you.
 
 What protects it:
 
@@ -244,10 +246,10 @@ What protects it:
   shell commands cannot read the profile.
 
 What it does **not** protect against: anything that can run commands outside
-a sandbox as your user can start the browser on that profile and read its
-cookies the same way this server does. Approve sandbox-bypass requests with
-that in mind. Delete the directory to forget the login; `logout` clears only
-the cached session cookie, not the profile.
+a sandbox as your user can start the browser on that profile and have it
+fill in the saved password; it still needs your 2FA to log in. Approve
+sandbox-bypass requests with that in mind. Delete the directory to forget the
+saved password; `logout` clears the cached session cookie.
 
 Only one browser can use the profile at a time — if a window from a previous
 `login` is still open, close it before calling `login` again.

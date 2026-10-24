@@ -548,6 +548,12 @@ const fs = require("node:fs");
 const mode = process.env.FAKE_BROWSER_MODE;
 const log = (entry) => fs.appendFileSync(process.env.FAKE_BROWSER_LOG, JSON.stringify(entry) + "\\n");
 log({ args: process.argv.slice(2) });
+const dir = (process.argv.find((a) => a.startsWith("--user-data-dir=")) || "").slice("--user-data-dir=".length);
+if (dir) {
+  fs.mkdirSync(dir + "/Default/Network", { recursive: true });
+  fs.writeFileSync(dir + "/Default/Network/Cookies", "oauth");
+  fs.writeFileSync(dir + "/Default/Login Data", "saved");
+}
 const out = fs.createWriteStream(null, { fd: 4 });
 const reply = (id, result) => out.write(JSON.stringify({ id, result }) + "\\0");
 const other = { name: "ponymail", value: "elsewhere", domain: "lists.example.org" };
@@ -562,6 +568,7 @@ fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
     buf = buf.slice(i + 1);
     log({ method: msg.method });
     if (msg.method === "Browser.close") { reply(msg.id, {}); setTimeout(() => process.exit(0), 10); continue; }
+    if (msg.method === "Storage.clearCookies") { reply(msg.id, {}); continue; }
     if (msg.method === "Storage.getCookies") {
       polls++;
       if (mode === "close" && polls > 2) process.exit(0);
@@ -625,6 +632,7 @@ test("performBrowserLogin: picks up the logged-in cookie, caches it and cleans u
 
     const methods = log.slice(1).map((e) => e.method);
     assert.equal(methods.filter((m) => m === "Storage.getCookies").length, 3);
+    assert.ok(!methods.includes("Storage.clearCookies"), "a throwaway profile is deleted, not cleared");
     assert.equal(methods.at(-1), "Browser.close");
   });
 });
@@ -641,10 +649,16 @@ test("performBrowserLogin: PONYMAIL_BROWSER_PROFILE=persistent keeps an owner-on
     const profile = path.join(home, ".ponymail-mcp", "browser-profile");
     const args = log[0].args;
     assert.ok(args.includes(`--user-data-dir=${profile}`));
+    assert.ok(args.includes("--profile-directory=Default"));
     assert.ok(!args.includes("--use-mock-keychain"));
     assert.ok(!args.includes("--password-store=basic"));
     assert.equal(existsSync(profile), true, "kept profile survives the login");
     assert.equal(statSync(profile).mode & 0o777, 0o700);
+    // Cookies are cleared before the window closes and the cookie store is
+    // deleted after it exits, so the next login asks for 2FA again.
+    assert.equal(existsSync(path.join(profile, "Default", "Network", "Cookies")), false);
+    assert.equal(existsSync(path.join(profile, "Default", "Login Data")), true, "saved passwords are kept");
+    assert.deepEqual(log.slice(1).map((e) => e.method).slice(-2), ["Storage.clearCookies", "Browser.close"]);
   });
 });
 

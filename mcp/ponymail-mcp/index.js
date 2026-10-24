@@ -667,8 +667,9 @@ server.tool(
     "afterwards). The user just logs in there; the session cookie is read " +
     "from that window automatically and the window closes — no copy & paste. " +
     "Waits up to 5 minutes for the user to log in. With " +
-    "PONYMAIL_BROWSER_PROFILE=persistent the profile is kept between logins, " +
-    "so a still-valid login completes without typing. If no such browser is " +
+    "PONYMAIL_BROWSER_PROFILE=persistent the profile is kept between logins " +
+    "so the browser can save the ASF password; its cookies are cleared after " +
+    "each login, so 2FA is still asked every time. If no such browser is " +
     "installed (or PONYMAIL_BROWSER=none), it opens a local helper page where " +
     "the user pastes the cookie copied from DevTools instead. If the MCP " +
     "server was started with PONYMAIL_AUTO_EXTRACT_COOKIE=1, it FIRST tries " +
