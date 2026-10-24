@@ -38,9 +38,10 @@
  * caller validates it, then the window is closed and the profile deleted.
  *
  * Opt-in persistent profile (PONYMAIL_BROWSER_PROFILE): the profile is kept
- * between logins, so the ASF OAuth / PonyMail login — and a password saved in
- * the browser's password manager — survive and the next login is a click or
- * nothing at all. A kept profile uses the OS credential store (macOS
+ * between logins, so a password saved in the browser's password manager
+ * survives. Its cookies do not: they are cleared when the login window
+ * closes, so the ASF OAuth session is never reused and every login asks for
+ * 2FA again. A kept profile uses the OS credential store (macOS
  * Keychain, Linux keyring) instead of the mock one, so its cookies and saved
  * passwords are encrypted at rest with a key only the browser can read
  * without an OS prompt.
@@ -196,6 +197,79 @@ export function pickSessionCookie(cookies, host) {
   return match ? `${COOKIE_NAME}=${match.value}` : null;
 }
 
+// Cookie stores of a Chromium profile, before and after Chrome 96 moved them
+// under Network/. Saved passwords are in "Login Data" and are kept.
+const COOKIE_FILES = ["Cookies", "Cookies-journal", "Network/Cookies", "Network/Cookies-journal"];
+
+/**
+ * Whether a running browser holds `profileDir`. On macOS and Linux Chromium
+ * leaves a SingletonLock symlink to "<host>-<pid>", which outlives a crash, so
+ * it only counts while that process is alive on this host. On Windows a
+ * held lockfile cannot be deleted, and a stale one can.
+ */
+export function isProfileHeld(profileDir) {
+  let target = null;
+  try {
+    target = fs.readlinkSync(path.join(profileDir, "SingletonLock"));
+  } catch {}
+  if (target !== null) {
+    const m = /^(.*)-(\d+)$/.exec(target);
+    if (m && m[1] === os.hostname()) {
+      try {
+        process.kill(Number(m[2]), 0);
+        return true;
+      } catch (err) {
+        if (err.code === "EPERM") return true;
+      }
+    } else if (m) {
+      return true; // another host's browser: we cannot tell, so keep its data
+    }
+  }
+  const lockfile = path.join(profileDir, "lockfile");
+  if (fs.existsSync(lockfile)) {
+    try {
+      fs.rmSync(lockfile);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Delete a kept profile's cookie store, unless a browser is using the profile
+ * (its database must not be pulled out from under it). Clearing over the
+ * DevTools pipe cannot run once the user has closed the window, so this runs
+ * before every login and after the browser exits: no ASF OAuth session
+ * outlives a login, and none is reused by the next one.
+ *
+ * @returns {boolean} false when a running browser holds the profile or a
+ *   cookie file could not be deleted
+ */
+export function clearCookieStore(profileDir) {
+  if (isProfileHeld(profileDir)) return false;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(profileDir, { withFileTypes: true });
+  } catch {}
+  // Every browser profile in the directory, not only the pinned Default: one
+  // opened before the pin, or by hand, holds a cookie store of its own.
+  const profiles = entries.filter((e) => e.isDirectory() && /^(Default|Profile \d+)$/.test(e.name));
+  let cleared = true;
+  for (const profile of profiles) {
+    for (const file of COOKIE_FILES) {
+      const target = path.join(profileDir, profile.name, file);
+      try {
+        fs.rmSync(target, { force: true, maxRetries: 5, retryDelay: 200 });
+      } catch (err) {
+        console.error(`[auth] could not delete ${target}: ${err.message}`);
+        cleared = false;
+      }
+    }
+  }
+  return cleared;
+}
+
 function browserArgs(profileDir, startUrl, persistent) {
   const args = [
     `--user-data-dir=${profileDir}`,
@@ -205,6 +279,9 @@ function browserArgs(profileDir, startUrl, persistent) {
     "--disable-sync",
     "--new-window",
   ];
+  // Pin the profile that clearCookieStore() cleans: with a URL argument
+  // Chromium may otherwise open the last-used one, such as "Profile 1".
+  if (persistent) args.push("--profile-directory=Default");
   // Keep a throwaway profile away from the OS credential store: no Keychain
   // prompt on macOS, no keyring prompt on Linux. A kept profile must use the
   // real store — with the mock one its cookies and passwords are encrypted
@@ -239,6 +316,13 @@ export function loginInBrowser({ browserPath, startUrl, host, accept, timeoutMs,
   if (persistent) {
     fs.mkdirSync(keptProfile, { recursive: true, mode: 0o700 });
     fs.chmodSync(keptProfile, 0o700);
+    // Fail closed: a login on a profile that still has its cookies could
+    // complete from an old ASF OAuth session, without 2FA.
+    if (!clearCookieStore(keptProfile)) {
+      return Promise.reject(new Error(
+        `Could not clear the cookies of the PonyMail login profile (${keptProfile}). ` +
+          "If a browser window using it is still open, close it and call login again."));
+    }
     profileDir = keptProfile;
   } else {
     profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "ponymail-mcp-browser-"));
@@ -266,13 +350,21 @@ export function loginInBrowser({ browserPath, startUrl, host, accept, timeoutMs,
     async function shutDown() {
       clearTimeout(pollTimer);
       clearTimeout(timer);
+      // The ASF OAuth cookies in a kept profile would let the next login skip
+      // 2FA. Saved passwords are not cookies and survive this.
+      if (persistent) {
+        try {
+          await Promise.race([cdp.send("Storage.clearCookies"), exited, delay(2000)]);
+        } catch {}
+      }
       try {
         await Promise.race([cdp.send("Browser.close"), exited]);
       } catch {}
       await Promise.race([exited, delay(3000)]);
       if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
       await Promise.race([exited, delay(1000)]);
-      if (!persistent) fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      if (persistent) clearCookieStore(profileDir);
+      else fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
 
     function settle(err, result) {

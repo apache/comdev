@@ -20,8 +20,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
-import { PipeCdp, pickSessionCookie, findBrowser } from "./browser-login.js";
+import { PipeCdp, pickSessionCookie, findBrowser, clearCookieStore, loginInBrowser } from "./browser-login.js";
 
 test("pickSessionCookie returns the ponymail cookie for the host", () => {
   const cookies = [
@@ -91,5 +94,69 @@ test("findBrowser honours PONYMAIL_BROWSER", () => {
   } finally {
     if (saved === undefined) delete process.env.PONYMAIL_BROWSER;
     else process.env.PONYMAIL_BROWSER = saved;
+  }
+});
+
+test("clearCookieStore removes the cookie stores and keeps saved passwords", () => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "ponymail-profile-test-"));
+  try {
+    const def = path.join(profile, "Default");
+    fs.mkdirSync(path.join(def, "Network"), { recursive: true });
+    for (const f of ["Cookies", "Cookies-journal", "Network/Cookies", "Network/Cookies-journal", "Login Data"]) {
+      fs.writeFileSync(path.join(def, f), "x");
+    }
+    clearCookieStore(profile);
+    assert.deepEqual(fs.readdirSync(def).sort(), ["Login Data", "Network"]);
+    assert.deepEqual(fs.readdirSync(path.join(def, "Network")), []);
+    const other = path.join(profile, "Profile 1");
+    fs.mkdirSync(other);
+    fs.writeFileSync(path.join(other, "Cookies"), "x");
+    clearCookieStore(profile);
+    assert.deepEqual(fs.readdirSync(other), [], "a non-Default profile is cleaned too");
+    clearCookieStore(fs.mkdtempSync(path.join(os.tmpdir(), "ponymail-empty-test-")));
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test("clearCookieStore leaves a profile alone while a browser holds it, not after a crash", { skip: process.platform === "win32" }, () => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "ponymail-locked-test-"));
+  const cookies = path.join(profile, "Default", "Cookies");
+  const lock = path.join(profile, "SingletonLock");
+  try {
+    fs.mkdirSync(path.join(profile, "Default"), { recursive: true });
+    fs.writeFileSync(cookies, "x");
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`, lock);
+    assert.equal(clearCookieStore(profile), false, "a live browser keeps its cookies");
+    assert.equal(fs.existsSync(cookies), true);
+    fs.rmSync(lock);
+    fs.symlinkSync(`${os.hostname()}-2147483646`, lock);
+    assert.equal(clearCookieStore(profile), true, "a crashed browser's lock is stale");
+    assert.equal(fs.existsSync(cookies), false);
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test("loginInBrowser refuses a kept profile whose cookies it cannot clear", { skip: process.platform === "win32" }, async () => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "ponymail-refuse-test-"));
+  try {
+    fs.mkdirSync(path.join(profile, "Default"), { recursive: true });
+    fs.writeFileSync(path.join(profile, "Default", "Cookies"), "x");
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`, path.join(profile, "SingletonLock"));
+    await assert.rejects(
+      loginInBrowser({
+        browserPath: path.join(profile, "no-such-browser"),
+        startUrl: "http://127.0.0.1:9/",
+        host: "127.0.0.1",
+        accept: async () => true,
+        timeoutMs: 1000,
+        profileDir: profile,
+      }),
+      /Could not clear the cookies/,
+    );
+    assert.equal(fs.existsSync(path.join(profile, "Default", "Cookies")), true);
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true });
   }
 });
