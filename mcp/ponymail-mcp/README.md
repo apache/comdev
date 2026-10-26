@@ -8,7 +8,8 @@ An MCP (Model Context Protocol) server that provides access to the [Apache PonyM
 |------|-------------|
 | `list_lists` | Get an overview of all available mailing lists and message counts |
 | `search_list` | Search/browse a mailing list with filters (date, sender, subject, body, query). Supports `mode: "threads"` to list one entry per thread (thread starters with reply counts and continuation hints). |
-| `get_email` | Fetch a specific email by ID with full body and attachments |
+| `get_email` | Fetch a specific email by ID with full body and attachment metadata (name, type, size, hash) |
+| `save_attachments` | Download an email's attachments into a local directory, decrypting and extracting password-protected ZIPs when given the password; returns only names, sizes, types and SHA-256 digests, never the contents. See [Saving attachments](#saving-attachments). |
 | `get_thread` | Fetch a complete email thread (full tree + flat message list). Supports `find_parent` to navigate to thread root from any reply. |
 | `get_source` | Fetch the raw RFC 2822 source of an email (original headers, MIME structure, encoded body) |
 | `get_mbox` | Download mbox-formatted archive data for bulk export |
@@ -65,6 +66,7 @@ proxy support is off. Only the value `1` enables it; `--use-env-proxy` in
 | `PONYMAIL_TOKEN` | *(none)* | Manual session token override (`pmt_…`). Takes precedence over `PONYMAIL_SESSION_COOKIE`. |
 | `PONYMAIL_RESTRICTED_LISTS` | *(see below)* | Comma-separated patterns to block pre-fetch. Set to `none` to clear pattern blocks. |
 | `PONYMAIL_ALLOWED_LISTS` | *(none)* | Comma-separated opt-in patterns. Lists matching these bypass all blocks. |
+| `PONYMAIL_ATTACHMENT_DIRS` | *(none — saving disabled)* | Comma-separated absolute directories `save_attachments` may write into (each root, or a directory inside one). See [Saving attachments](#saving-attachments). |
 
 ## Restricted Lists
 
@@ -345,6 +347,95 @@ You can also approve a token manually by opening `token.html` without a
 Cookie sessions expire after ~20 hours; session tokens at the time the server
 set. Use `auth_status` to check, `logout` to clear.
 
+## Saving attachments
+
+`get_source` and `get_mbox` truncate their output, so an attachment cannot be
+recovered from them. `save_attachments` downloads an email's attachments
+through PonyMail's attachment endpoint and writes them to disk instead:
+
+- **Saving is off until you choose where.** Set `PONYMAIL_ATTACHMENT_DIRS` to
+  the comma-separated absolute directories the server may write into; without
+  it the tool refuses every call. Keep the list short, usually one directory,
+  and never your home directory, a repository checkout, or a directory
+  holding configuration or credentials. The MCP server usually runs outside
+  the agent's sandbox, so this list, not the sandbox, is what limits where it
+  writes.
+- **Make the directory read-only to the agent.** The agent should be able to
+  read the saved files but not change anything under the directory: only this
+  server writes there. Node has no `openat()`, so the checks below are made
+  on paths, and a caller that can rename directories under the root while a
+  save runs could race them into writing elsewhere. A directory the caller
+  cannot write leaves nothing to race. In Claude Code's sandbox, for example,
+  choose a directory the sandbox can read (such as one under `~/.cache/`) and
+  add an `Edit(<directory>/**)` rule to `permissions.deny`, which also denies
+  sandboxed commands writing to, or renaming, that directory.
+- Use a directory under your own home, not a shared one such as `/tmp`. At
+  start the server refuses a root that is a symlink, is not owned by you, is
+  writable by group or others, or sits below a directory owned by another
+  user or writable by group or others (other than a sticky one such as
+  `/tmp`). The same ownership and permission rules apply to every component
+  of the path as configured, symlinks included, so a directory or link
+  someone else planted is never trusted.
+- The roots are created (mode `0700`) and pinned when the server starts: their
+  canonical path and identity are recorded then, and a root that is later
+  replaced, moved, or turned into a symlink makes the tool refuse to save
+  until the server restarts.
+- `dir` must be an absolute path with no `.` or `..` segments, and must be one
+  of those roots or a directory inside one. Symlinks are resolved before the
+  check, both before and after the directory is created. After the file is
+  created, and before anything is written to it, the server confirms the
+  directory is still the one it checked and the file is still the one it
+  opened, so a directory swapped for a symlink mid-save normally receives no
+  bytes (at most an empty file); these are defence in depth behind the
+  read-only directory above, not a replacement for it. A missing `dir` is
+  created (mode `0700`); files are created with mode `0600`.
+- Filenames come from the sender, so they are reduced to ASCII
+  `[A-Za-z0-9._-]` (accents folded, everything else non-ASCII dropped), with no
+  path separators, no `..` and no leading dot. A name with nothing usable left
+  becomes `attachment-<hash>`, and Windows device names (`CON`, `NUL.txt`,
+  `COM1`, ...) get a leading `_`.
+- Existing files are never overwritten or written through when they are a symlink: a
+  name already present gets a numbered sibling (`repro-1.java`).
+- Each download is checked against the size and SHA-256 hash PonyMail
+  reports; a mismatch is reported and nothing is written. The body is read
+  incrementally and the download is cancelled as soon as it passes the
+  reported size, or 50 MB when no size is reported; attachments reported as
+  larger than 50 MB are skipped.
+- `hashes` (from `get_email`) limits the download to some of the attachments.
+
+### Encrypted attachments
+
+Security reports often send the proof of concept as a password-protected ZIP,
+with the password in the message text, so mail filters neither strip nor run
+it. Each saved file is checked for its format, and the result says whether it
+is a ZIP (encrypted or not), 7z, RAR or PGP message.
+
+- With `password`, ZIP attachments (ZipCrypto or AES) are decrypted and
+  extracted into `<name>-extracted/` next to the archive. The password is
+  never echoed in the result. A wrong password is reported; the archive
+  itself stays saved.
+- Extracted files go through the same writer as attachments: the same roots,
+  the same filename rules applied to every path component, no overwrites.
+  Symlinks and other special entries are skipped, never created. An archive
+  whose entry names try to leave the directory (`../`, absolute paths) is not
+  extracted at all.
+- At most 1000 entries (directories included) are read and 200 MB extracted
+  per archive, and an entry is cut off as soon as it inflates past its
+  declared size, so a decompression bomb or an archive of countless tiny
+  entries does not exhaust the disk or memory. Each entry's CRC-32 is checked,
+  so a wrong password never yields a garbage file.
+- Names that sanitize to the same path as a directory (`config` and
+  `.config/x`) get a numbered name instead of blocking the directory.
+- The result lists at most 50 extracted files and 50 skipped entries, with
+  names cut to 120 characters, and counts the rest.
+- 7z, RAR and PGP files are saved but not decrypted; open those in an
+  isolated environment.
+- The same list restrictions as `get_email` apply.
+
+The tool result never contains the attachment bytes, so a PoC or archive does
+not land in the model's context. Treat the saved files as untrusted input:
+inspect them as data, and do not run them outside an isolated environment.
+
 ## Usage Examples
 
 Once connected, you can ask things like:
@@ -358,5 +449,8 @@ Once connected, you can ask things like:
 - "Fetch email with ID xyz..."
 - "Get the full thread for this email, navigating to the root"
 - "Show me the raw source of that email"
+- "Save that email's attachments to ~/.cache/ponymail-attachments/report-1"
+  (with `PONYMAIL_ATTACHMENT_DIRS` set to that directory's absolute path)
+- "Save the attachments of that report and unpack the ZIP with the password from the message"
 - "What restrictions are currently active?"
 - "Get the mbox archive for dev@httpd.apache.org for 2024-03"
